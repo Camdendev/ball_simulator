@@ -36,6 +36,9 @@ What you can control includes:
 - **Look:** solid or gradient background, ball and ring color modes, rainbow step, trails, glow, particle amount
 - **Text & layout:** font, bold, shadow or outline, sizes and colors for the title, stats, footer and banner, a timer, team names. Drag text or the arena in the preview to reposition it.
 - **Export:** 720p to 4K, 30 or 60 fps, quality, and supersampled anti-aliasing
+- **Line battle:** what happens to a cut line (destroy, steal, or swap one each), lines per bounce, first to N lines wins, no-deaths period, starting lines per team and their placement, line width and opacity
+- **Fine-tuning:** physics substeps, minimum speed, minimum impact that plays a note, speed of newly spawned balls, spin step and twist between walls, color saturation and brightness, wall color cycle speed, hit flash, glow strength and size, trail opacity, outline width and color, and particle speed, lifetime, size and gravity
+- **Sound:** note order (forward, reverse, ping-pong, random), harder hits play louder, stereo panning by ball position
 
 ## Songs
 
@@ -86,6 +89,7 @@ Headless / batch rendering:
 ## Controls
 
 - `Space` play/pause · `R` restart · `Esc` cancel a recording
+- Click any slider's number to type an exact value: Enter or click away applies it, Esc cancels, Tab / Shift+Tab moves to the next / previous number, ↑/↓ nudge by one step. Typed values are clamped to the slider's range.
 - Every option is a dropdown: click it, then pick an item (scroll for long lists, Esc to close)
 - Colors are dropdowns with swatches (or set any hex in `config.json`)
 - The window renders at native Retina resolution. Preview smoothing and video anti-aliasing (supersampling) are in the Look and Recording sections.

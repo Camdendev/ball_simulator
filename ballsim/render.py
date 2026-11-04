@@ -87,6 +87,7 @@ class Renderer:
         bg = hex_rgb(c['bg'])
         self._background(c, surf)
         mode = c['mode']
+        fl = float(c['flash_strength'])
         X, Y = sim.cx * s, sim.cy * s
         th = float(c['ring_thickness'])
 
@@ -95,12 +96,12 @@ class Renderer:
         elif mode == 'polygon':
             for ring in sorted((r for r in sim.rings if r.alive), key=lambda r: -r.r):
                 col = self._wall_color(sim, ring, bg)
-                self._polygon(surf, X, Y, ring.r * s, (th + ring.flash * 6) * s, ring.rot,
+                self._polygon(surf, X, Y, ring.r * s, (th + ring.flash * 6 * fl) * s, ring.rot,
                               max(3, int(c['poly_sides'])), bool(c['poly_open']), col)
         else:
             gap = math.radians(float(c['gap_deg'])) if mode in ('escape', 'rings') else 0.0
             for ring in sorted((r for r in sim.rings if r.alive), key=lambda r: -r.r):
-                tw = (th + ring.flash * 6) * s
+                tw = (th + ring.flash * 6 * fl) * s
                 if ring.segs:
                     n = len(ring.segs)
                     seg = math.tau / n
@@ -110,7 +111,7 @@ class Renderer:
                             continue
                         col = mix(bg, sim.ring_color(ring, i), 0.35 + 0.65 * hp / ring.seg_max)
                         if ring.flash > 0 and i == ring.last_seg:
-                            col = mix(col, WHITE, ring.flash * 0.6)
+                            col = mix(col, WHITE, ring.flash * 0.6 * float(sim.cfg['flash_strength']))
                         a0 = ring.rot + i * seg + pad
                         self._arc(surf, X, Y, ring.r * s, tw, a0, a0 + seg - 2 * pad, col)
                     continue
@@ -138,7 +139,7 @@ class Renderer:
         if ring.hp_max > 0:
             col = mix(bg, col, 0.35 + 0.65 * ring.hp / ring.hp_max)
         if ring.flash > 0:
-            col = mix(col, WHITE, ring.flash * 0.6)
+            col = mix(col, WHITE, ring.flash * 0.6 * float(sim.cfg['flash_strength']))
         return col
 
     @staticmethod
@@ -216,7 +217,7 @@ class Renderer:
         multi = len(sim.roster) > 1
         for l in sim.lines:
             o = l.owner
-            col = mix(bg, sim.ball_color(o) if multi else hsl(l.hue), op)
+            col = mix(bg, sim.ball_color(o) if multi else sim.hue_color(l.hue), op)
             a, b = (l.ax * s, l.ay * s), (o.x * s, o.y * s)
             if w <= 1:
                 pygame.draw.aaline(surf, col, a, b)
@@ -227,6 +228,9 @@ class Renderer:
         c = sim.cfg
         many = len(sim.balls)
         glow = c['glow'] and many <= 60
+        t_op = float(c['trail_opacity'])
+        ow = float(c['outline_width'])
+        gs_k, gs_size = float(c['glow_strength']), float(c['glow_size'])
         for b in sim.balls:
             col = sim.ball_color(b)
             rr = b.r * s
@@ -236,30 +240,30 @@ class Renderer:
                 for k, (tx, ty) in enumerate(b.trail):
                     f = (k + 1) / (n + 1)
                     gfxdraw.filled_circle(surf, int(tx * s), int(ty * s),
-                                          max(1, int(rr * (0.35 + 0.65 * f))), mix(base, col, f * 0.55))
+                                          max(1, int(rr * (0.35 + 0.65 * f))), mix(base, col, f * t_op))
             X, Y = b.x * s, b.y * s
             if glow:
-                gs = self._glow_surf(col, rr)
+                gs = self._glow_surf(col, rr, gs_k, gs_size)
                 surf.blit(gs, (X - gs.get_width() / 2, Y - gs.get_height() / 2),
                           special_flags=pygame.BLEND_RGB_ADD)
             ri = max(1, int(round(rr)))
             gfxdraw.filled_circle(surf, int(X), int(Y), ri, col)
             gfxdraw.aacircle(surf, int(X), int(Y), ri, col)
             if c['ball_outline']:
-                pygame.draw.circle(surf, WHITE, (int(X), int(Y)), ri, max(1, int(3 * s)))
+                pygame.draw.circle(surf, hex_rgb(c['outline_color']), (int(X), int(Y)), ri, max(1, int(ow * s)))
 
-    def _glow_surf(self, col, rr):
-        key = (col[0] // 16, col[1] // 16, col[2] // 16, int(rr))
+    def _glow_surf(self, col, rr, strength=0.5, size=2.4):
+        key = (col[0] // 16, col[1] // 16, col[2] // 16, int(rr), strength, size)
         g = self._glow.get(key)
         if g is not None:
             return g
         if len(self._glow) > 400:
             self._glow.clear()
-        R = int(rr * 2.4) + 2
+        R = int(rr * max(1.1, size)) + 2
         size = 2 * R
         yy, xx = np.mgrid[0:size, 0:size]
         d = np.hypot(xx - R + 0.5, yy - R + 0.5)
-        inten = np.clip(1 - (d - rr) / max(1.0, R - rr), 0, 1) ** 2 * 0.5
+        inten = np.clip(1 - (d - rr) / max(1.0, R - rr), 0, 1) ** 2 * strength
         arr = (np.array(col, float)[None, None, :] * inten[..., None]).astype(np.uint8)
         g = pygame.surfarray.make_surface(arr.transpose(1, 0, 2))
         self._glow[key] = g

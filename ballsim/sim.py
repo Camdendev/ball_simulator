@@ -109,6 +109,19 @@ class Sim:
         p.particles = float(c['particle_amount']) if c['particles'] else 0.0
         p.hue_step = float(c['hue_step'])
         p.rainbow = c['ball_color_mode'] == 'rainbow'
+        p.min_bounce = float(c['min_bounce_speed'])
+        p.min_speed = float(c['min_speed'])
+        p.spin_step = float(c['wall_spin_step']) / 100
+        p.sat = float(c['color_saturation'])
+        p.lit = float(c['color_lightness'])
+        p.rainbow_speed = float(c['rainbow_speed'])
+        p.p_speed = float(c['particle_speed'])
+        p.p_life = float(c['particle_life'])
+        p.p_size = float(c['particle_size'])
+        p.p_grav = float(c['particle_gravity'])
+        p.jitter = math.radians(float(c['battle_jitter']))
+        p.cut_action = c['line_cut_action']
+        p.lines_per_bounce = int(c['lines_per_bounce'])
 
     def reset(self):
         c = self.cfg
@@ -123,6 +136,8 @@ class Sim:
         self.finish_t = 0.0
         self.banner = ''
         self.banner_color = None
+        self.last_x = self.W / 2      # where/how hard the latest hit was (for panning / velocity)
+        self.last_impact = 600.0
         self.cx, self.cy = self.W / 2, self.H / 2 + float(c['arena_offset'])
         self.R = float(c['arena_radius']) - float(c['ring_thickness'])
         self.balls, self.particles, self.lines, self.rings = [], [], [], []
@@ -142,7 +157,7 @@ class Sim:
         sp = (self.R - inner) / (n - 1) if n > 1 else 0.0
         hp = max(0, int(c['wall_hp']))
         for i in range(n):
-            ring = Ring(inner + i * sp, gap0 + (i * 0.3 if n > 1 else 0.0), i)
+            ring = Ring(inner + i * sp, gap0 + i * math.radians(float(c['wall_twist'])), i)
             ring.hp = ring.hp_max = hp
             if mode == 'segments':
                 ring.seg_max = max(1, int(c['seg_hp']))
@@ -233,6 +248,8 @@ class Sim:
                     x, y = self.cx + dx * lim / dd, self.cy + dy * lim / dd
         a = self._launch_angle(spawned)
         s = float(c['speed'])
+        if spawned and float(c['spawn_speed']) > 0:
+            s = float(c['spawn_speed'])
         b = Ball(self.next_id, team, x, y, math.cos(a) * s, math.sin(a) * s, r, rng.random() * 360)
         self.next_id += 1
         return b
@@ -259,7 +276,7 @@ class Sim:
                     if team == 1:
                         a = math.pi - a  # mirror for the other side
                 else:
-                    a = math.pi / 4 + self.rng.randrange(4) * math.pi / 2 + (self.rng.random() - 0.5) * 0.5
+                    a = math.pi / 4 + self.rng.randrange(4) * math.pi / 2 + (self.rng.random() - 0.5) * 0.5  # avoid axis-aligned
                 self.balls.append(Ball(self.next_id, team, x, y, math.cos(a) * s, math.sin(a) * s, r, 0))
                 self.next_id += 1
         self.roster = list(self.balls)
@@ -289,17 +306,21 @@ class Sim:
             return self.team_color(b.team)
         if c['ball_color_mode'] == 'solid':
             return hex_rgb(c['ball_color'])
-        return hsl(b.hue)
+        return self.hue_color(b.hue)
+
+    def hue_color(self, h):
+        return hsl(h, self.p.sat, self.p.lit)
 
     def ring_color(self, ring, seg=None):
         c = self.cfg
         if c['ring_color_mode'] == 'solid':
             return hex_rgb(c['ring_color'])
-        if c['mode'] == 'rings':
-            return hsl(ring.idx / max(1, len(self.rings)) * 300 + self.t * 30)
+        sp = self.p.rainbow_speed
+        if len(self.rings) > 1:
+            return self.hue_color(ring.idx / len(self.rings) * 300 + self.t * sp)
         if seg is not None and ring.segs:
-            return hsl(seg / len(ring.segs) * 360 + self.t * 20)
-        return hsl(self.t * 40)
+            return self.hue_color(seg / len(ring.segs) * 360 + self.t * sp * 0.5)
+        return self.hue_color(self.t * sp)
 
     # ------------------------------------------------------------------- step
     def step(self, dt):
@@ -334,7 +355,7 @@ class Sim:
 
         if self.particles:
             keep = []
-            gdt = 500 * dt
+            gdt = self.p.p_grav * dt
             for pt in self.particles:
                 pt.life += dt
                 if pt.life < pt.max:
@@ -369,7 +390,7 @@ class Sim:
             if not r.alive:
                 continue
             d = -1 if (multi and p.alt and r.idx % 2) else 1
-            k = 1 + 0.04 * r.idx if multi else 1.0
+            k = 1 + p.spin_step * r.idx if multi else 1.0
             r.rot += (p.spin * k + r.extra) * d * h
 
     def _circle_sub(self, h):
@@ -420,8 +441,8 @@ class Sim:
         vn = b.vx * nx + b.vy * ny
         if vn > 0:
             self._reflect(b, nx, ny, vn)
-            if vn > 30:
-                self._bounce(b, ring, self.cx + nx * R, self.cy + ny * R)
+            if vn > p.min_bounce:
+                self._bounce(b, ring, self.cx + nx * R, self.cy + ny * R, vn)
         R = ring.r  # may have changed (shrink / grow)
         b.x = self.cx + nx * (R - b.r)
         b.y = self.cy + ny * (R - b.r)
@@ -435,7 +456,7 @@ class Sim:
         if p.boost != 1.0 or p.max_speed:
             sp = math.sqrt(b.vx * b.vx + b.vy * b.vy)
             if sp > 0:
-                ns = min(sp * p.boost, p.max_speed)
+                ns = min(max(sp * p.boost, p.min_speed), p.max_speed)
                 if ns != sp:
                     f = ns / sp
                     b.vx *= f
@@ -492,13 +513,18 @@ class Sim:
                     vn = b.vx * nx + b.vy * ny
                     if vn > 0:
                         self._reflect(b, nx, ny, vn)
-                        if vn > 30:
-                            self._bounce(b, ring, b.x + nx * r, b.y + ny * r)
+                        if vn > p.min_bounce:
+                            self._bounce(b, ring, b.x + nx * r, b.y + ny * r, vn)
                             if not ring.alive:
                                 return
 
     # ---------------------------------------------------------- events
-    def _bounce(self, b, ring, px, py):
+    def _hit(self, x, impact=600.0):
+        self.last_x = x
+        self.last_impact = impact
+        self.on_hit()
+
+    def _bounce(self, b, ring, px, py, impact=600.0):
         c, p = self.cfg, self.p
         self.hits += 1
         b.bounces += 1
@@ -549,9 +575,10 @@ class Sim:
                     for k in range(8):
                         a = ring.rot + (i + (k + 0.5) / 8) * TAU / n
                         self._burst(self.cx + math.cos(a) * ring.r, self.cy + math.sin(a) * ring.r, col, 2, 260)
-        elif mode == 'lines':
-            self.lines.append(Line(px, py, b, b.hue))
-            b.lines += 1
+        elif mode == 'lines' and p.lines_per_bounce > 0:
+            for _ in range(p.lines_per_bounce):
+                self.lines.append(Line(px, py, b, b.hue))
+                b.lines += 1
             cap = max(1, int(c['max_lines']))
             while b.lines > cap:
                 for i, l in enumerate(self.lines):
@@ -559,6 +586,7 @@ class Sim:
                         del self.lines[i]
                         break
                 b.lines -= 1
+            self._check_line_win(b)
         if ring.alive and ring.hp_max > 0:
             ring.hp -= 1
             if ring.hp <= 0:
@@ -566,7 +594,7 @@ class Sim:
                 if not any(r.alive for r in self.rings):
                     self._finish(c['end_text'] or 'BROKE FREE!')
         self._burst(px, py, self.ball_color(b), 6, 250)
-        self.on_hit()
+        self._hit(px, impact)
 
     def _shatter(self, ring):
         """Destroy a wall with a burst of particles."""
@@ -591,7 +619,7 @@ class Sim:
             self._shatter(ring)
             if not any(r.alive for r in self.rings):
                 self._finish(c['end_text'] or 'ESCAPED!')
-            self.on_hit()
+            self._hit(b.x, 900.0)
             return True
 
         b.escaped = True
@@ -610,7 +638,7 @@ class Sim:
             self._finish(c['end_text'] or 'ESCAPED!')
         elif act == 'spawn' and alive >= cap:
             self._finish(c['end_text'] or f'{cap} BALLS!')
-        self.on_hit()
+        self._hit(b.x, 900.0)
         return False
 
     def _finish(self, text):
@@ -679,12 +707,16 @@ class Sim:
 
     # -------------------------------------------------------- line battle
     def _cut_lines(self):
+        """Balls crossing enemy lines. What happens depends on line_cut_action:
+        destroy (line gone), steal (cutter takes it), swap (cutter takes it and
+        hands one of its own lines back)."""
         if not self.lines:
             return
         c = self.cfg
+        action = self.p.cut_action
         balls = [b for b in self.balls if not b.dead]
         keep = []
-        cut_any = False
+        victims, gainers, swaps = set(), set(), []
         for l in self.lines:
             o = l.owner
             ax, ay, bx, by = l.ax, l.ay, o.x, o.y
@@ -708,23 +740,60 @@ class Sim:
                 t = 0.0 if t < 0 else tmax if t > tmax else t
                 qx, qy = ax + t * ex, ay + t * ey
                 if (px - qx) ** 2 + (py - qy) ** 2 < r * r:
-                    cut = (qx, qy)
+                    cut = (qx, qy, b)
                     break
-            if cut:
-                cut_any = True
-                o.lines -= 1
-                self._burst(cut[0], cut[1], self.ball_color(o), 8, 250)
-                self.hits += 1
-                self.on_hit()
-                if (o.lines <= 0 and c['eliminate_lines'] and not o.dead
-                        and self.t >= float(c['eliminate_after'])):
+            if not cut:
+                keep.append(l)
+                continue
+            thief = cut[2]
+            o.lines -= 1
+            victims.add(o)
+            self._burst(cut[0], cut[1], self.ball_color(o), 8, 250)
+            self.hits += 1
+            self._hit(cut[0], math.hypot(thief.vx, thief.vy))
+            if action in ('steal', 'swap'):
+                l.owner = thief
+                l.hue = thief.hue
+                thief.lines += 1
+                gainers.add(thief)
+                keep.append(l)
+                if action == 'swap':
+                    swaps.append((thief, o, l))
+        if not victims:
+            return
+
+        for thief, o, stolen in swaps:  # hand one of the thief's other lines back
+            for l in keep:
+                if l.owner is thief and l is not stolen:
+                    l.owner = o
+                    l.hue = o.hue
+                    thief.lines -= 1
+                    o.lines += 1
+                    break
+
+        cap = max(1, int(c['max_lines']))
+        for g in gainers:  # respect the per-ball line limit (drop the oldest)
+            extra = g.lines - cap
+            if extra > 0:
+                drop = set()
+                for l in keep:
+                    if extra <= 0:
+                        break
+                    if l.owner is g:
+                        drop.add(id(l))
+                        extra -= 1
+                keep = [l for l in keep if id(l) not in drop]
+                g.lines = min(g.lines, cap)
+
+        if c['eliminate_lines'] and self.t >= float(c['eliminate_after']):
+            for o in victims:
+                if o.lines <= 0 and not o.dead:
                     o.dead = True
                     self._burst(o.x, o.y, self.ball_color(o), 60, 600)
-            else:
-                keep.append(l)
-        if not cut_any:
-            return
         self.lines = [l for l in keep if not l.owner.dead]
+        for g in gainers:
+            if not g.dead:
+                self._check_line_win(g)
         if any(b.dead for b in self.balls):
             self.balls = [b for b in self.balls if not b.dead]
             if len(self.roster) > 1 and len(self.balls) == 1:
@@ -733,6 +802,15 @@ class Sim:
                 self._finish(c['end_text'] or f'{self.team_name(w.team).upper()} WINS!')
             elif not self.balls:
                 self._finish(c['end_text'] or 'DRAW!')
+
+    def _check_line_win(self, b):
+        """First ball to hold `win_lines` lines wins (0 = off)."""
+        need = int(self.cfg['win_lines'])
+        if need > 0 and len(self.roster) > 1 and b.lines >= need and not self.finished:
+            self.banner_color = self.ball_color(b)
+            self._finish(self.cfg['end_text'] or f'{self.team_name(b.team).upper()} WINS!')
+            for x in self.balls:
+                x.frozen = x is not b  # losers stop; the winner keeps bouncing
 
     # ------------------------------------------------------ territory battle
     def _battle_sub(self, h):
@@ -759,13 +837,13 @@ class Sim:
                             by = by or sa * b.vy > 0
                         self._burst(x0 + (i + 0.5) * cell, y0 + (j + 0.5) * cell, self.team_color(team), 3, 150)
                         self.hits += 1
-                        self.on_hit()
+                        self._hit(b.x, math.hypot(b.vx, b.vy))
             if bx:
                 b.vx = -b.vx
             if by:
                 b.vy = -b.vy
             if bx or by:
-                a = (self.rng.random() - 0.5) * 0.06
+                a = (self.rng.random() - 0.5) * 2 * self.p.jitter
                 ca, sa = math.cos(a), math.sin(a)
                 b.vx, b.vy = b.vx * ca - b.vy * sa, b.vx * sa + b.vy * ca
             if b.x - r < x0:
@@ -781,14 +859,17 @@ class Sim:
         amt = self.p.particles
         if amt <= 0 or len(self.particles) > 2000:
             return
+        p = self.p
         n = int(n * amt + self.fx.random())
-        fx = self.fx
-        rnd = fx.random
+        rnd = self.fx.random
         ps = self.particles
+        speed *= p.p_speed
+        life, size = p.p_life, p.p_size
         for _ in range(n):
             a = rnd() * TAU
-            s = speed * (0.3 + rnd())
-            ps.append(Particle(x, y, math.cos(a) * s, math.sin(a) * s, 0.4 + rnd() * 0.4, color, 3 + rnd() * 4))
+            sp = speed * (0.3 + rnd())
+            ps.append(Particle(x, y, math.cos(a) * sp, math.sin(a) * sp, (0.4 + rnd() * 0.4) * life,
+                               color, (3 + rnd() * 4) * size))
 
     # ------------------------------------------------------------------ stats
     def stats(self):

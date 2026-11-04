@@ -2,7 +2,7 @@
 import numpy as np
 import pygame
 
-from .music import chord_buffer
+from .music import chord_buffer, pan_gains
 
 
 class LiveAudio:
@@ -14,7 +14,7 @@ class LiveAudio:
         self.music_path = None
         self.state = 'stopped'
 
-    def play(self, notes, inst, length, volume):
+    def play(self, notes, inst, length, volume, pan=0.0):
         if not self.ok:
             return
         key = (notes, inst, round(length, 3))
@@ -26,8 +26,10 @@ class LiveAudio:
             if len(self._sounds) > 400:
                 self._sounds.clear()
             self._sounds[key] = snd
-        snd.set_volume(volume)
-        snd.play()
+        snd.set_volume(min(1.0, volume))
+        ch = snd.play()
+        if ch is not None and pan:
+            ch.set_volume(*pan_gains(pan))
 
     # Audio-file mode: the track plays only while balls keep bouncing.
     def load_music(self, path):

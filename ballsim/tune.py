@@ -58,9 +58,20 @@ class Tuner:
             self.param = None
         elif choice == 'time_scale':
             self.param = SPEED_PARAM
+        elif cfg['mode'] == 'lines' and cfg['line_cut_action'] != 'destroy' and int(cfg['win_lines']) > 0:
+            # with stealing nobody runs out, so the match length is set by the win target
+            self.param = ('win_lines', 'lines to win', 5, max(10, int(cfg['max_lines'])), True, False)
         else:
             self.param = MODE_PARAM.get(cfg['mode'], SPEED_PARAM)
         self.try_seeds = bool(cfg['tune_seed']) or self.param is None
+        # extra variations swept alongside the main value
+        self.variants = [{}]
+        if self.param and self.param[0] == 'win_lines' and cfg['eliminate_lines']:
+            # early knock-outs cut matches short; also try a longer no-deaths period
+            self.variants.append({'eliminate_after': round(self.target * 0.8, 1)})
+        self.labels = {'seed': 'seed', 'time_scale': 'speed', 'eliminate_after': 'no-deaths period'}
+        if self.param:
+            self.labels[self.param[0]] = self.param[1]
         self.limit = int(self.target * 2.5 * FPS) + int(float(cfg['start_delay']) * FPS)
         self.best = None      # (error, finish_time, overrides)
         self.runs = 0
@@ -119,12 +130,11 @@ class Tuner:
                 hi = self.target
             # 1. coarse sweep
             vals = _values(lo, hi, 10, is_int, geo)
-            results = []
-            for i, v in enumerate(vals):
-                self.status = f'Trying {label} {v} ({i + 1}/{len(vals)}) · {self._fmt_best()}'
-                t = yield from self._simulate({key: v})
-                results.append((v, t))
-                self._consider({key: v}, t)
+            combos = [dict(var, **{key: v}) for var in self.variants for v in vals]
+            for i, ov in enumerate(combos):
+                self.status = f'Trying {label} {ov[key]} ({i + 1}/{len(combos)}) · {self._fmt_best()}'
+                t = yield from self._simulate(ov)
+                self._consider(ov, t)
                 if self._good_enough():
                     break
             # 2. refine between the neighbours of the best value
@@ -134,10 +144,12 @@ class Tuner:
                 a = vals[max(0, idx - 1)]
                 b = vals[min(len(vals) - 1, idx + 1)]
                 fine = [v for v in _values(min(a, b), max(a, b), 8, is_int, False) if v not in vals]
+                var = {k: v for k, v in self.best[2].items() if k != key}
                 for i, v in enumerate(fine):
                     self.status = f'Refining {label} {v} ({i + 1}/{len(fine)}) · {self._fmt_best()}'
-                    t = yield from self._simulate({key: v})
-                    self._consider({key: v}, t)
+                    ov = dict(var, **{key: v})
+                    t = yield from self._simulate(ov)
+                    self._consider(ov, t)
                     if self._good_enough():
                         break
             start = dict(self.best[2]) if self.best else {}
@@ -164,8 +176,6 @@ class Tuner:
             return f'Auto-fit: no run ended within {self.target * 2.5:.0f}s — try a different setting to adjust'
         parts = []
         for k, v in self.best[2].items():
-            label = SPEED_PARAM[1] if k == 'time_scale' else 'seed' if k == 'seed' else \
-                next((p[1] for p in MODE_PARAM.values() if p[0] == k), k)
-            parts.append(f'{label} {v}')
+            parts.append(f'{self.labels.get(k, k)} {v}')
         return (f'Fitted ({", ".join(parts) or "no change"}): ends at {self.best[1]:.1f}s, '
                 f'target {self.target:.0f}s · {self.runs} test runs')

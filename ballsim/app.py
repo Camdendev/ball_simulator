@@ -10,7 +10,7 @@ import pygame
 from .audio_live import LiveAudio
 from .config import ASPECTS, DEFAULTS, MODE_PRESETS, load_config, save_config
 from .export import Exporter
-from .music import INSTRUMENTS, PRESETS, SongPlayer, midi_track_options
+from .music import INSTRUMENTS, PRESETS, SongPlayer, hit_gain_pan, midi_track_options
 from .render import FONT_OPTIONS, Renderer
 from .sim import Sim
 from .tune import Tuner, tunable
@@ -141,6 +141,14 @@ def build_schema():
         slider('bounce_boost', 'Speed-up per bounce', 1.0, 1.1, 0.002, live=True, show=_not_battle),
         slider('max_speed', 'Max speed', 200, 6000, 50, live=True, show=_not_battle),
         toggle('ball_collisions', 'Balls collide', live=True, show=_not_battle),
+        slider('min_speed', 'Min speed', 0, 2000, 10, live=True, show=_not_battle),
+        slider('min_bounce_speed', 'Min impact for note', 0, 600, 5, live=True, show=_not_battle),
+        slider('spawn_speed', 'New ball speed', 0, 2500, 10, live=True,
+               show=_mode('escape', 'polygon', 'segments')),
+        dict(kind='info', text='New ball speed: 0 = same as launch speed', show=_mode('escape', 'polygon', 'segments')),
+        slider('battle_jitter', 'Bounce jitter (deg)', 0, 20, 0.1, live=True, show=_mode('battle')),
+        slider('substeps', 'Physics substeps', 1, 24, 1),
+        dict(kind='info', text='More substeps = more accurate, slower'),
         slider('growth', 'Growth per bounce', 0.2, 20, 0.1, live=True, show=_mode('grow')),
         choice('escape_action', 'When a ball escapes', [('spawn', 'Spawn new balls'), ('respawn', 'Respawn one'),
                                                         ('finish', 'It escaped (end)')], live=True,
@@ -154,6 +162,12 @@ def build_schema():
                show=lambda c: c['mode'] in ('escape', 'polygon', 'segments', 'multiply')),
         slider('max_lines', 'Max lines per ball', 5, 500, 5, live=True, show=_mode('lines')),
         toggle('cut_lines', 'Balls cut enemy lines', live=True, show=_mode('lines')),
+        choice('line_cut_action', 'When a line is cut', [('destroy', 'Destroy it'), ('steal', 'Cutter steals it'),
+                                                          ('swap', 'Swap (trade one each)')], live=True,
+               show=lambda c: c['mode'] == 'lines' and c['cut_lines']),
+        slider('lines_per_bounce', 'Lines per bounce', 0, 5, 1, live=True, show=_mode('lines')),
+        slider('win_lines', 'Win at lines (0=off)', 0, 300, 1, live=True,
+               show=lambda c: c['mode'] == 'lines' and c['ball_count'] > 1),
         slider('line_width', 'Line width (px)', 0.5, 12, 0.5, live=True, show=_mode('lines')),
         slider('line_opacity', 'Line opacity', 0.1, 1.0, 0.05, live=True, show=_mode('lines')),
         toggle('eliminate_lines', 'Ball dies at 0 lines', live=True, show=_mode('lines')),
@@ -175,6 +189,10 @@ def build_schema():
         slider('ring_spacing', 'Wall spacing (px)', 8, 150, 1, show=lambda c: c['mode'] != 'battle' and c['wall_count'] > 1),
         toggle('alternate_spin', 'Alternate spin', live=True,
                show=lambda c: c['mode'] in SPINNING and c['wall_count'] > 1),
+        slider('wall_spin_step', 'Spin step per wall (%)', -20, 20, 0.5, live=True,
+               show=lambda c: c['mode'] in SPINNING and c['wall_count'] > 1),
+        slider('wall_twist', 'Wall twist (deg)', -180, 180, 1,
+               show=lambda c: c['mode'] in SPINNING and c['wall_count'] > 1),
         slider('wall_hp', 'Hits to break wall', 0, 100, 1, show=_not_battle),
         dict(kind='info', text='0 = walls never break from hits', show=_not_battle),
         slider('grid_size', 'Grid size', 6, 60, 1, show=_mode('battle')),
@@ -186,20 +204,34 @@ def build_schema():
         choice('ball_color_mode', 'Ball color', [('rainbow', 'Rainbow'), ('random', 'Random'), ('solid', 'Solid')],
                live=True, show=lambda c: c['mode'] != 'battle'),
         color('ball_color', 'Ball solid color', show=lambda c: c['ball_color_mode'] == 'solid' and c['mode'] != 'battle'),
-        toggle('ball_outline', 'White outline', live=True),
+        toggle('ball_outline', 'Ball outline', live=True),
+        slider('outline_width', 'Outline width (px)', 0.5, 12, 0.5, live=True, show=lambda c: c['ball_outline']),
+        color('outline_color', 'Outline color', show=lambda c: c['ball_outline']),
+        slider('color_saturation', 'Color saturation', 0, 1, 0.01, live=True),
+        slider('color_lightness', 'Color brightness', 0.2, 0.9, 0.01, live=True),
         choice('ring_color_mode', 'Ring color', [('rainbow', 'Rainbow'), ('solid', 'Solid')], live=True,
                show=_not_battle),
         color('ring_color', 'Ring solid color', show=lambda c: c['ring_color_mode'] == 'solid' and c['mode'] != 'battle'),
         color('team_a', 'Team A color', show=_mode('lines', 'battle')),
         color('team_b', 'Team B color', show=_mode('lines', 'battle')),
+        slider('rainbow_speed', 'Wall color cycle speed', 0, 360, 1, live=True,
+               show=lambda c: c['ring_color_mode'] == 'rainbow' and c['mode'] != 'battle'),
+        slider('flash_strength', 'Wall hit flash', 0, 2, 0.05, live=True, show=_not_battle),
         slider('trail', 'Trail length', 0, 40, 1, live=True),
+        slider('trail_opacity', 'Trail opacity', 0.05, 1, 0.05, live=True, show=lambda c: c['trail'] > 0),
         choice('preview_aa', 'Preview smoothing', [(1, 'Off (fastest)'), (2, '2x supersample'),
                                                    (3, '3x supersample')], live=True),
         toggle('glow', 'Glow', live=True),
+        slider('glow_strength', 'Glow strength', 0.05, 1.5, 0.05, live=True, show=lambda c: c['glow']),
+        slider('glow_size', 'Glow size (×radius)', 1.2, 5, 0.1, live=True, show=lambda c: c['glow']),
         slider('hue_step', 'Rainbow step', 0, 120, 1, live=True,
                show=lambda c: c['ball_color_mode'] == 'rainbow' and c['mode'] != 'battle'),
         toggle('particles', 'Particles', live=True),
         slider('particle_amount', 'Particle amount', 0.1, 4, 0.1, live=True, show=lambda c: c['particles']),
+        slider('particle_speed', 'Particle speed', 0.1, 4, 0.1, live=True, show=lambda c: c['particles']),
+        slider('particle_life', 'Particle lifetime', 0.1, 4, 0.1, live=True, show=lambda c: c['particles']),
+        slider('particle_size', 'Particle size', 0.2, 5, 0.1, live=True, show=lambda c: c['particles']),
+        slider('particle_gravity', 'Particle gravity', -1000, 3000, 10, live=True, show=lambda c: c['particles']),
 
         section('Sound'),
         choice('song_source', 'Song', SOURCES, song=True),
@@ -217,6 +249,11 @@ def build_schema():
         slider('transpose', 'Transpose', -24, 24, 1, live=True, show=_src('preset', 'text', 'midi')),
         slider('min_note_gap_ms', 'Min note gap (ms)', 0, 300, 5, live=True,
                show=_src('preset', 'text', 'midi')),
+        choice('note_order', 'Note order', [('forward', 'Forward'), ('reverse', 'Reverse'),
+                                            ('pingpong', 'Ping-pong'), ('random', 'Random')], song=True,
+               show=_src('preset', 'text', 'midi')),
+        toggle('velocity_sensitive', 'Harder hits = louder', live=True, show=_src('preset', 'text', 'midi')),
+        slider('stereo_pan', 'Stereo pan by position', 0, 1, 0.05, live=True, show=_src('preset', 'text', 'midi')),
         slider('volume', 'Volume', 0, 1, 0.05, live=True),
 
         section('Text & layout'),
@@ -347,8 +384,9 @@ class App:
     def on_hit(self):
         notes = self.player.hit(self.clock)
         if notes:
+            gain, pan = hit_gain_pan(self.cfg, self.sim)
             self.audio.play(notes, self.cfg['instrument'], float(self.cfg['note_length']),
-                            float(self.cfg['volume']))
+                            float(self.cfg['volume']) * gain, pan)
 
     def reset(self):
         self.sim.reset()

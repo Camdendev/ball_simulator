@@ -12,7 +12,7 @@ import numpy as np
 import pygame
 
 from .config import ASPECTS
-from .music import SR, SongPlayer, chord_buffer
+from .music import SR, SongPlayer, chord_buffer, hit_gain_pan, pan_gains
 from .render import Renderer
 from .sim import Sim
 
@@ -68,7 +68,7 @@ class Exporter:
         t = self.frame / self.fps
         notes = self.player.hit(t)
         if notes:
-            self.notes.append((t, notes))
+            self.notes.append((t, notes) + hit_gain_pan(self.cfg, self.sim))
 
     @property
     def progress(self):
@@ -100,12 +100,14 @@ class Exporter:
         out = np.zeros((n, 2), np.float32)
         vol = float(c['volume'])
         length = round(float(c['note_length']), 3)
-        for t, notes in self.notes:
-            buf = chord_buffer(notes, c['instrument'], length) * vol
+        for t, notes, gain, pan in self.notes:
+            buf = chord_buffer(notes, c['instrument'], length) * (vol * gain)
             i = int(t * SR)
             j = min(n, i + len(buf))
             if j > i:
-                out[i:j] += buf[:j - i, None]
+                gl, gr = pan_gains(pan)
+                out[i:j, 0] += buf[:j - i] * gl
+                out[i:j, 1] += buf[:j - i] * gr
 
         if c['song_source'] == 'audio' and c['audio_path'] and os.path.exists(c['audio_path']):
             song = decode_audio(c['audio_path']) * vol

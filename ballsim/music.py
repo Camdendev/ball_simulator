@@ -203,6 +203,21 @@ def chord_buffer(notes, inst, length):
     return out * (0.38 / math.sqrt(len(bufs)))
 
 
+def hit_gain_pan(cfg, sim):
+    """Per-note loudness (from impact speed) and stereo pan (from x position)."""
+    gain = 1.0
+    if cfg['velocity_sensitive']:
+        gain = max(0.2, min(1.0, sim.last_impact / 900.0))
+    pan = max(-1.0, min(1.0, (sim.last_x / sim.W * 2 - 1) * float(cfg['stereo_pan'])))
+    return gain, pan
+
+
+def pan_gains(pan):
+    """Equal-power pan, normalized so centre = full volume in both ears."""
+    a = (pan + 1) * math.pi / 4
+    return min(1.0, math.cos(a) * math.sqrt(2)), min(1.0, math.sin(a) * math.sqrt(2))
+
+
 # ------------------------------------------------------------ song player
 class SongPlayer:
     """Decides what plays on each hit. `t` is the video clock in seconds."""
@@ -215,6 +230,8 @@ class SongPlayer:
 
     def reset(self):
         self.idx = 0
+        import random
+        self.order_rng = random.Random(int(self.cfg['seed']) + 1)
         self.last = -1e9
         self.audio_until = -1.0
 
@@ -251,7 +268,19 @@ class SongPlayer:
         if not self.events or t - self.last < float(c['min_note_gap_ms']) / 1000:
             return None
         self.last = t
-        ev = self.events[self.idx % len(self.events)]
+        n = len(self.events)
+        order = c['note_order']
+        k = self.idx
+        if order == 'reverse':
+            i = n - 1 - k % n
+        elif order == 'pingpong' and n > 1:
+            k %= 2 * n - 2
+            i = k if k < n else 2 * n - 2 - k
+        elif order == 'random':
+            i = self.order_rng.randrange(n)
+        else:
+            i = k % n
+        ev = self.events[i]
         self.idx += 1
         tr = int(c['transpose'])
         notes = tuple(n + tr for n in ev if 0 <= n + tr < 128)

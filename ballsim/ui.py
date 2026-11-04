@@ -58,6 +58,7 @@ class Panel:
         self.drag = None
         self.focus = None
         self.edit = ''
+        self.fresh = False
         self.dropdown = None  # (def, anchor rect, scroll)
         self.rows = []
         self.content_h = 0
@@ -137,15 +138,27 @@ class Panel:
             if kind == 'slider':
                 mn, mx = self._bounds(d)
                 frac = 0 if mx == mn else (min(mx, max(mn, v)) - mn) / (mx - mn)
-                val_w = int(52 * k)
+                tw, vbox = self._slider_parts(cr)
                 th = max(2, int(4 * k))
-                track = pygame.Rect(cr.x, cr.centery - th // 2, cr.w - val_w - int(8 * k), th)
+                track = pygame.Rect(cr.x, cr.centery - th // 2, tw, th)
                 pygame.draw.rect(surf, FIELD, track, border_radius=th)
                 pygame.draw.rect(surf, ACCENT, (track.x, track.y, int(track.w * frac), th), border_radius=th)
                 kx = track.x + int(track.w * frac)
                 pygame.draw.circle(surf, FG if not hover else (255, 255, 255), (kx, track.centery), int(8 * k))
-                t = self.font.render(_fmt(v, d['step']), True, FG)
-                surf.blit(t, (cr.right - t.get_width(), cr.centery - t.get_height() // 2))
+                focused = self.focus is d
+                vhover = vbox.collidepoint(self.mouse) and not self.dropdown
+                pygame.draw.rect(surf, FIELD_HOVER if (vhover or focused) else FIELD, vbox, border_radius=int(5 * k))
+                if focused:
+                    pygame.draw.rect(surf, ACCENT, vbox, max(1, int(k)), border_radius=int(5 * k))
+                    txt = self._clip(self.font, self.edit, vbox.w - int(14 * k), tail=True) + '|'
+                    if self.fresh:  # whole value selected: typing replaces it
+                        sel = pygame.Rect(0, 0, self.font.size(self.edit)[0] + int(4 * k), vbox.h - int(8 * k))
+                        sel.midright = (vbox.right - int(10 * k), vbox.centery)
+                        pygame.draw.rect(surf, (70, 90, 170), sel.clip(vbox), border_radius=int(3 * k))
+                else:
+                    txt = self._clip(self.font, _fmt(v, d['step']), vbox.w - int(10 * k))
+                t = self.font.render(txt, True, FG)
+                surf.blit(t, (vbox.right - t.get_width() - int(6 * k), vbox.centery - t.get_height() // 2))
             elif kind in ('choice', 'color'):
                 pygame.draw.rect(surf, FIELD_HOVER if hover else FIELD, cr, border_radius=rad)
                 x = cr.x + int(10 * k)
@@ -344,19 +357,43 @@ class Panel:
             return True
 
         if self.focus:
+            numeric = self.focus['kind'] == 'slider'
             if e.type == pygame.TEXTINPUT:
-                self.edit += e.text
+                txt = e.text
+                if numeric:
+                    txt = ''.join(ch for ch in txt if ch in '0123456789.-,eE')
+                if self.fresh:
+                    self.edit = ''
+                    self.fresh = False
+                self.edit += txt
                 return True
             if e.type == pygame.KEYDOWN:
                 mods = pygame.key.get_mods()
                 if e.key == pygame.K_BACKSPACE:
-                    self.edit = '' if mods & (pygame.KMOD_META | pygame.KMOD_CTRL) else self.edit[:-1]
+                    if self.fresh or mods & (pygame.KMOD_META | pygame.KMOD_CTRL):
+                        self.edit = ''
+                    else:
+                        self.edit = self.edit[:-1]
+                    self.fresh = False
+                elif numeric and e.key in (pygame.K_UP, pygame.K_DOWN):
+                    self._nudge(self.focus, 1 if e.key == pygame.K_UP else -1)
+                elif e.key == pygame.K_TAB:
+                    # jump to the next (or previous) number box
+                    sliders = [d for d, _ in self.rows if d['kind'] == 'slider']
+                    cur = self.focus
+                    self._commit()
+                    if cur in sliders and sliders:
+                        step = -1 if mods & pygame.KMOD_SHIFT else 1
+                        self._focus_number(sliders[(sliders.index(cur) + step) % len(sliders)])
                 elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     self._commit()
                 elif e.key == pygame.K_ESCAPE:
                     self.focus = None
                     pygame.key.stop_text_input()
                 elif e.key == pygame.K_v and mods & (pygame.KMOD_META | pygame.KMOD_CTRL):
+                    if self.fresh:
+                        self.edit = ''
+                        self.fresh = False
                     self.edit += self._paste()
                 return True
         return False
@@ -377,8 +414,14 @@ class Panel:
         key = d['key']
         cr = self.ctrl_rect(r)
         if kind == 'slider' and button == 1:
-            self.drag = (d, r)
-            self._slide(d, r, pos[0], final=False)
+            if self._slider_parts(cr)[1].collidepoint(pos):
+                self._focus_number(d)
+            else:
+                if self.focus is d:  # dragging wins over a half-typed number
+                    self.focus = None
+                    pygame.key.stop_text_input()
+                self.drag = (d, r)
+                self._slide(d, r, pos[0], final=False)
         elif kind in ('choice', 'color') and cr.collidepoint(pos):
             items = self._dd_items(d)
             vals = [v for v, _ in items]
@@ -391,11 +434,50 @@ class Panel:
         elif kind == 'text':
             self.focus = d
             self.edit = str(cfg[key])
+            self.fresh = False
             pygame.key.start_text_input()
+
+    def _slider_parts(self, cr):
+        """(track width, value-box rect) for a slider's control area."""
+        vw = int(68 * self.k)
+        vbox = pygame.Rect(cr.right - vw, cr.y, vw, cr.h)
+        return cr.w - vw - int(12 * self.k), vbox
+
+    def _focus_number(self, d):
+        self._commit()
+        self.focus = d
+        self.edit = _fmt(self.app.cfg[d['key']], d['step'])
+        self.fresh = True
+        pygame.key.start_text_input()
+
+    def _number(self, d, text):
+        """Parse typed text into a value within the slider's range, or None."""
+        try:
+            v = float(text.strip().replace(',', '.'))
+        except ValueError:
+            return None
+        if v != v:  # NaN
+            return None
+        mn, mx = self._bounds(d)
+        v = max(mn, min(mx, v))
+        step = d['step']
+        if step >= 1 and float(step).is_integer() and float(mn).is_integer():
+            return int(round(v))
+        return round(v, 6)
+
+    def _nudge(self, d, direction):
+        v = self._number(d, self.edit)
+        if v is None:
+            v = self.app.cfg[d['key']]
+        v = self._number(d, str(v + direction * d['step']))
+        if v is not None:
+            self.edit = _fmt(v, d['step'])
+            self.fresh = False
+            self.app.set(d['key'], v)
 
     def _slide(self, d, r, x, final):
         cr = self.ctrl_rect(r)
-        tw = cr.w - int(52 * self.k) - int(8 * self.k)
+        tw = self._slider_parts(cr)[0]
         frac = max(0.0, min(1.0, (x - cr.x) / tw))
         (mn, mx), step = self._bounds(d), d['step']
         v = mn + frac * (mx - mn)
@@ -409,7 +491,12 @@ class Panel:
             d = self.focus
             self.focus = None
             pygame.key.stop_text_input()
-            self.app.set(d['key'], self.edit, final=True)
+            if d['kind'] == 'slider':
+                v = self._number(d, self.edit)
+                if v is not None:
+                    self.app.set(d['key'], v, final=True)
+            else:
+                self.app.set(d['key'], self.edit, final=True)
 
     @staticmethod
     def _paste():
