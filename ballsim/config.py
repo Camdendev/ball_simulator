@@ -1,0 +1,178 @@
+import json
+import os
+
+ASPECTS = {
+    '9:16': (1080, 1920),
+    '1:1': (1080, 1080),
+    '4:5': (1080, 1350),
+    '16:9': (1920, 1080),
+}
+
+DEFAULTS = {
+    # Scene
+    'mode': 'escape',
+    'aspect': '9:16',
+    'seed': 7,
+    'time_scale': 1.0,
+    'start_delay': 0.5,
+    'substeps': 6,
+    # Start
+    'start_pos': 'jitter',
+    'start_x_px': 0,
+    'start_y_px': 0,
+    'spread_px': 230,
+    'launch_dir': 'random',
+    'launch_angle': 45,
+    'gap_start': 90,
+    'start_lines': 0,
+    'start_lines_split': False,
+    'start_lines_b': 3,
+    'start_lines_layout': 'random',
+    'start_lines_arc': 120,
+    'line_width': 2.5,
+    'line_opacity': 0.8,
+    # Balls
+    'ball_count': 1,
+    'ball_radius': 20,
+    'speed': 600,
+    'gravity': 900,
+    'gravity_angle': 270,
+    'air_drag': 0.0,
+    'restitution': 1.0,
+    'bounce_boost': 1.0,
+    'max_speed': 2600,
+    'ball_collisions': False,
+    'growth': 2.5,
+    'spawn_per_escape': 2,
+    'max_balls': 200,
+    'max_lines': 150,
+    'cut_lines': True,
+    'eliminate_lines': True,
+    'eliminate_after': 3.0,
+    'escape_action': 'spawn',
+    'shrink': 6.0,
+    'shrink_stop': 1.15,
+    'multiply_chance': 0.5,
+    # Arena
+    'arena_radius': 486,
+    'arena_offset': 0,
+    'ring_thickness': 10,
+    'gap_deg': 40,
+    'ring_spin': 70,
+    'wall_count': 1,
+    'wall_hp': 0,
+    'ring_spacing': 32,
+    'alternate_spin': True,
+    'grid_size': 24,
+    'spin_boost': 0.0,
+    'poly_sides': 6,
+    'poly_open': True,
+    'seg_count': 24,
+    'seg_hp': 2,
+    # Look
+    'bg': '#0a0a12',
+    'bg_style': 'solid',
+    'bg2': '#1b1b2f',
+    'ball_color_mode': 'rainbow',
+    'ball_color': '#ffffff',
+    'ball_outline': False,
+    'ring_color_mode': 'rainbow',
+    'ring_color': '#ffffff',
+    'team_a': '#ff3b5c',
+    'team_b': '#2ec5ff',
+    'trail': 6,
+    'preview_aa': 2,
+    'glow': True,
+    'particles': True,
+    'particle_amount': 1.0,
+    'hue_step': 23,
+    # Sound
+    'song_source': 'preset',
+    'preset': 'ode',
+    'song_text': 'C4 E4 G4 C5 G4 E4',
+    'midi_path': '',
+    'midi_track': -1,
+    'top_note_only': False,
+    'audio_path': '',
+    'slice_ms': 250,
+    'instrument': 'piano',
+    'note_length': 0.35,
+    'transpose': 0,
+    'volume': 0.7,
+    'min_note_gap_ms': 40,
+    # Text & layout
+    'title': 'Every escape = 2 more balls',
+    'font': 'sf',
+    'text_bold': True,
+    'text_style': 'shadow',
+    'title_px': 63,
+    'title_color': '#ffffff',
+    'show_stats': True,
+    'stats_px': 48,
+    'stats_color': '#ebebf0',
+    'show_timer': False,
+    'footer': '',
+    'footer_px': 32,
+    'footer_color': '#9aa0a6',
+    'end_text': '',
+    'banner_px': 120,
+    'banner_color': '#ffffff',
+    'team_a_name': 'Red',
+    'team_b_name': 'Blue',
+    'layout': 'auto',
+    'title_y_px': 230,
+    'stats_y_px': 1650,
+    'footer_y_px': 1830,
+    # Recording
+    'max_duration': 60,
+    'target_time': 30,
+    'tune_param': 'auto',
+    'tune_seed': True,
+    'stop_on_finish': True,
+    'outro': 2.0,
+    'crf': 18,
+    'fps': 60,
+    'export_res': 1080,
+    'antialias': 2,
+}
+
+MODE_PRESETS = {
+    'escape': dict(wall_count=1, gravity=900, speed=600, gap_deg=40, ring_spin=70, ball_radius=20, ball_count=1,
+                   trail=6, escape_action='spawn', title='Every escape = 2 more balls'),
+    'rings': dict(wall_count=12, gravity=800, speed=500, gap_deg=35, ring_spin=60, ball_radius=18, ball_count=1,
+                  trail=10, title='Can it escape all the rings?'),
+    'grow': dict(wall_count=1, gravity=1100, speed=500, ball_radius=20, growth=2.5, ball_count=1, trail=0,
+                 title='The ball grows every bounce'),
+    'shrink': dict(wall_count=1, gravity=900, speed=650, ball_radius=22, shrink=6.0, ball_count=1, trail=6,
+                   title='The circle shrinks every bounce'),
+    'multiply': dict(wall_count=1, gravity=600, speed=600, ball_radius=14, multiply_chance=0.5, max_balls=150,
+                     ball_count=1, trail=0, title='Every bounce = a new ball'),
+    'polygon': dict(wall_count=1, gravity=900, speed=600, ring_spin=60, ball_radius=20, ball_count=1, poly_sides=6,
+                    poly_open=True, escape_action='spawn', trail=6, title='Escape the spinning hexagon'),
+    'segments': dict(wall_count=1, gravity=900, speed=700, ring_spin=30, ball_radius=20, ball_count=1, seg_count=24,
+                     seg_hp=2, escape_action='finish', trail=6, title='Every hit cracks the wall'),
+    'lines': dict(wall_count=1, gravity=500, speed=700, ball_radius=26, ball_count=2, trail=0, start_lines=3,
+                  title='Red vs Blue'),
+    'battle': dict(speed=1500, ball_radius=14, ball_count=1, trail=0, grid_size=24,
+                   title='Territory battle'),
+}
+
+
+def load_config(path):
+    cfg = dict(DEFAULTS)
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            cfg.update({k: v for k, v in data.items() if k in DEFAULTS})
+        except (OSError, ValueError) as e:
+            print(f'Could not read {path}: {e}')
+    return cfg
+
+
+def save_config(cfg, path):
+    try:
+        with open(path, 'w') as f:
+            json.dump(cfg, f, indent=2)
+    except OSError as e:
+        print(f'Could not save {path}: {e}')
