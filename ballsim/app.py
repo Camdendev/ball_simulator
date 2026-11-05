@@ -8,7 +8,7 @@ import time
 import pygame
 
 from .audio_live import LiveAudio
-from .config import ASPECTS, DEFAULTS, MODE_PRESETS, load_config, save_config
+from .config import ASPECTS, CRUSH_TITLES, DEFAULTS, MODE_PRESETS, load_config, save_config
 from .export import Exporter
 from .music import INSTRUMENTS, PRESETS, SongPlayer, hit_gain_pan, midi_track_options
 from .render import FONT_OPTIONS, Renderer
@@ -24,7 +24,8 @@ AUDIO_EXT = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.opus'}
 MODES = [('escape', 'Escape (balls multiply)'), ('rings', 'Ring escape'),
          ('polygon', 'Spinning polygon'), ('segments', 'Breakable wall'),
          ('grow', 'Grow on bounce'), ('shrink', 'Shrinking circle'),
-         ('multiply', 'Multiply on bounce'), ('lines', 'Line battle'), ('battle', 'Territory battle')]
+         ('multiply', 'Multiply on bounce'), ('lines', 'Line battle'), ('battle', 'Territory battle'),
+         ('crusher', 'Ball crusher')]
 CIRCLE = ('escape', 'rings', 'grow', 'lines', 'shrink', 'multiply', 'segments')
 SPINNING = ('escape', 'rings', 'polygon', 'segments')
 EXITS = ('escape', 'polygon', 'segments')
@@ -40,6 +41,26 @@ def _mode(*modes):
 
 def _not_battle(c):
     return c['mode'] != 'battle'
+
+
+def _ringed(c):
+    """Modes with round/polygon walls (nested walls, wall HP, ...)."""
+    return c['mode'] not in ('battle', 'crusher')
+
+
+def _crush(*kinds):
+    return lambda c: c['mode'] == 'crusher' and (not kinds or c['crush_type'] in kinds)
+
+
+def _box(c):
+    return c['mode'] == 'crusher' and c['crush_type'] != 'hooks'
+
+
+def _win_info(c):
+    a = int(c['start_lines'])
+    b = int(c['start_lines_b']) if c['start_lines_split'] else a
+    need = Sim.win_target(c, max(a, b))
+    return f'Starts with {max(a, b)} lines, so the win target is {need}'
 
 
 def _half_w(c):
@@ -158,8 +179,9 @@ def build_schema():
         slider('shrink', 'Shrink per bounce (px)', 0.5, 40, 0.5, live=True, show=_mode('shrink')),
         slider('shrink_stop', 'Stop at ×ball size', 1.0, 3.0, 0.05, live=True, show=_mode('shrink')),
         slider('multiply_chance', 'Chance to multiply', 0.05, 1.0, 0.05, live=True, show=_mode('multiply')),
-        slider('max_balls', 'Max balls', 2, 500, 1, live=True,
-               show=lambda c: c['mode'] in ('escape', 'polygon', 'segments', 'multiply')),
+        slider('max_balls', 'Max balls', 2, 1000, 1, live=True,
+               show=lambda c: c['mode'] in ('escape', 'polygon', 'segments', 'multiply') or (
+                   c['mode'] == 'crusher' and c['crush_action'] == 'multiply')),
         slider('max_lines', 'Max lines per ball', 5, 500, 5, live=True, show=_mode('lines')),
         toggle('cut_lines', 'Balls cut enemy lines', live=True, show=_mode('lines')),
         choice('line_cut_action', 'When a line is cut', [('destroy', 'Destroy it'), ('steal', 'Cutter steals it'),
@@ -168,11 +190,55 @@ def build_schema():
         slider('lines_per_bounce', 'Lines per bounce', 0, 5, 1, live=True, show=_mode('lines')),
         slider('win_lines', 'Win at lines (0=off)', 0, 300, 1, live=True,
                show=lambda c: c['mode'] == 'lines' and c['ball_count'] > 1),
+        dict(kind='info', text=_win_info,
+             show=lambda c: c['mode'] == 'lines' and c['ball_count'] > 1 and 0 < c['win_lines'] <= max(
+                 c['start_lines'], c['start_lines_b'] if c['start_lines_split'] else 0)),
         slider('line_width', 'Line width (px)', 0.5, 12, 0.5, live=True, show=_mode('lines')),
         slider('line_opacity', 'Line opacity', 0.1, 1.0, 0.05, live=True, show=_mode('lines')),
         toggle('eliminate_lines', 'Ball dies at 0 lines', live=True, show=_mode('lines')),
         slider('eliminate_after', 'No deaths before (s)', 0, 20, 0.5, live=True,
                show=lambda c: c['mode'] == 'lines' and c['eliminate_lines']),
+
+        section('Crusher'),
+        choice('crush_type', 'Crusher type', [('press', 'Press (top + bottom meet)'),
+                                              ('vice', 'Vice (left + right meet)'),
+                                              ('compactor', '4-way (all four meet)'),
+                                              ('hooks', 'Spinning hooks')], show=_crush()),
+        dict(kind='info', text='Balls only pop between two crusher heads, never against a wall', show=_crush()),
+        # box crushers
+        slider('crush_width', 'Head width (px)', 40, 1000, 10, show=_box),
+        choice('crush_trigger', 'Crusher moves', [('time', 'Steadily over time'), ('bounce', 'A step every bounce')],
+               live=True, show=_box),
+        choice('crush_motion', 'Movement style', [('steady', 'Steady'), ('smooth', 'Smooth (ease in/out)'),
+                                                  ('slam', 'Creep then slam'), ('pulse', 'Pulsing (stop-start)')],
+               live=True, show=lambda c: _box(c) and c['crush_trigger'] == 'time'),
+        slider('crush_speed', 'Crush speed (px/s)', 5, 2000, 5, live=True,
+               show=lambda c: _box(c) and c['crush_trigger'] == 'time'),
+        slider('crush_step', 'Crush per bounce (px)', 1, 200, 1, live=True,
+               show=lambda c: _box(c) and c['crush_trigger'] == 'bounce'),
+        slider('crush_open', 'Open speed (% of close)', 10, 1000, 10, live=True, show=_box),
+        slider('crush_ramp', 'Faster each round (%)', 0, 100, 1, live=True, show=_box),
+        slider('crush_ramp_max', 'Speed-up limit (×)', 1, 20, 1, live=True,
+               show=lambda c: _box(c) and c['crush_ramp'] > 0),
+        slider('crush_spin', 'Crusher spin (deg/s)', -360, 360, 5, show=_box),
+        # hooks
+        slider('hook_count', 'Number of hooks', 2, 8, 1, show=_crush('hooks')),
+        choice('hook_style', 'Hook motion', [('scissor', 'Scissor (neighbours spin opposite)'),
+                                             ('chase', 'Chase (one catches the next)')], show=_crush('hooks')),
+        slider('hook_speed', 'Hook spin (deg/s)', 5, 1080, 5, live=True, show=_crush('hooks')),
+        slider('hook_accel', 'Spin-up (deg/s per s)', 0, 200, 1, live=True, show=_crush('hooks')),
+        slider('hook_flip', 'Reverse every (s, 0=off)', 0, 30, 1, live=True, show=_crush('hooks')),
+        slider('hook_curve', 'Hook curl (deg)', -270, 270, 5, live=True, show=_crush('hooks')),
+        slider('hook_length', 'Hook length (%)', 10, 100, 1, live=True, show=_crush('hooks')),
+        # balls
+        slider('crush_limit', 'Pops when squashed to (%)', 5, 95, 1, live=True, show=_crush()),
+        dict(kind='info', text='e.g. 50 = pops at half its height', show=_crush()),
+        slider('crush_grow', 'Ball grows per bounce (px)', 0, 20, 1, live=True, show=_crush()),
+        choice('crush_action', 'When a ball is squished', [('none', 'It\'s gone'), ('pieces', 'Breaks into smaller pieces'),
+                                                           ('multiply', 'Multiplies (new full-size balls)')],
+               live=True, show=_crush()),
+        slider('crush_pieces', lambda c: 'New balls per squish' if c['crush_action'] == 'multiply' else 'Pieces per squish',
+               1, 10, 1, live=True, show=lambda c: _crush()(c) and c['crush_action'] != 'none'),
 
         section('Arena'),
         slider('arena_radius', 'Arena radius (px)', 100, lambda c: max(_half_w(c), _half_h(c)), 1),
@@ -185,16 +251,16 @@ def build_schema():
         toggle('poly_open', 'One side open', live=True, show=_mode('polygon')),
         slider('seg_count', 'Wall segments', 3, 72, 1, show=_mode('segments')),
         slider('seg_hp', 'Hits per segment', 1, 10, 1, show=_mode('segments')),
-        slider('wall_count', 'Number of walls', 1, 40, 1, show=_not_battle),
-        slider('ring_spacing', 'Wall spacing (px)', 8, 150, 1, show=lambda c: c['mode'] != 'battle' and c['wall_count'] > 1),
+        slider('wall_count', 'Number of walls', 1, 40, 1, show=_ringed),
+        slider('ring_spacing', 'Wall spacing (px)', 8, 150, 1, show=lambda c: _ringed(c) and c['wall_count'] > 1),
         toggle('alternate_spin', 'Alternate spin', live=True,
                show=lambda c: c['mode'] in SPINNING and c['wall_count'] > 1),
         slider('wall_spin_step', 'Spin step per wall (%)', -20, 20, 0.5, live=True,
                show=lambda c: c['mode'] in SPINNING and c['wall_count'] > 1),
         slider('wall_twist', 'Wall twist (deg)', -180, 180, 1,
                show=lambda c: c['mode'] in SPINNING and c['wall_count'] > 1),
-        slider('wall_hp', 'Hits to break wall', 0, 100, 1, show=_not_battle),
-        dict(kind='info', text='0 = walls never break from hits', show=_not_battle),
+        slider('wall_hp', 'Hits to break wall', 0, 100, 1, show=_ringed),
+        dict(kind='info', text='0 = walls never break from hits', show=_ringed),
         slider('grid_size', 'Grid size', 6, 60, 1, show=_mode('battle')),
 
         section('Look'),
@@ -411,6 +477,10 @@ class App:
         if key == 'mode':
             c.update(MODE_PRESETS[c['mode']])
             self.reset()
+        elif key == 'crush_type':
+            if c['title'] in CRUSH_TITLES.values():
+                c['title'] = CRUSH_TITLES[c['crush_type']]
+            self.reset()
         elif key == 'aspect':
             self.sim = Sim(c, ASPECTS[c['aspect']], on_hit=self.on_hit)
             self.reset()
@@ -614,7 +684,7 @@ class App:
                 if e.type == pygame.QUIT:
                     if self.export:
                         self.export.cancel()
-                    save_config(self.cfg, self.config_path)
+                    save_config(dict(DEFAULTS), self.config_path)  # every session starts fresh
                     pygame.quit()
                     return
                 if e.type in resize_events:

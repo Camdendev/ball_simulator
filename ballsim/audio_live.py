@@ -40,7 +40,7 @@ class LiveAudio:
         try:
             pygame.mixer.music.load(path)
             self.music_path = path
-        except pygame.error as e:
+        except (pygame.error, OSError) as e:
             print(f'Could not load audio for preview: {e}')
 
     def update_music(self, t, until, volume, active):

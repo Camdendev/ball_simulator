@@ -29,6 +29,7 @@ You don't need to install ffmpeg yourself: it comes with `imageio-ffmpeg`. If on
 | **Multiply** | Every bounce has a chance to spawn a copy of the ball. |
 | **Line battle** | Every bounce leaves a line from the wall to the ball. Balls cut enemy lines, a ball whose last line is cut is eliminated, and the last ball standing wins. |
 | **Territory battle** | Two balls fight over a grid, flipping the enemy's tiles to their color. |
+| **Ball crusher** | Crusher heads (flat platforms on rods) slide out of the walls and meet in the middle: **press** (top and bottom), **vice** (left and right) or **4-way** (all four). Or **spinning hooks**: 2–8 curved arms around a hub that cross like scissors or chase each other. Balls only pop when caught between two heads, never against a wall. Options include head width, movement style (steady, smooth, creep-then-slam, pulsing), open speed, speed-up per round, a spinning crusher, hook spin-up and reversing, curl (even into spirals), length, how flat a ball gets before popping, balls growing on every bounce, and what a squished ball does (gone, smaller pieces, or multiply up to the max ball count). |
 
 What you can control includes:
 - **Start:** position, launch angle or random launch, spread, where the opening starts, starting lines
@@ -36,7 +37,7 @@ What you can control includes:
 - **Look:** solid or gradient background, ball and ring color modes, rainbow step, trails, glow, particle amount
 - **Text & layout:** font, bold, shadow or outline, sizes and colors for the title, stats, footer and banner, a timer, team names. Drag text or the arena in the preview to reposition it.
 - **Export:** 720p to 4K, 30 or 60 fps, quality, and supersampled anti-aliasing
-- **Line battle:** what happens to a cut line (destroy, steal, or swap one each), lines per bounce, first to N lines wins, no-deaths period, starting lines per team and their placement, line width and opacity
+- **Line battle:** what happens to a cut line (destroy, steal, or swap one each), lines per bounce, first to N lines wins (at least half of N must be earned beyond the starting lines), no-deaths period, starting lines per team and their placement, line width and opacity
 - **Fine-tuning:** physics substeps, minimum speed, minimum impact that plays a note, speed of newly spawned balls, spin step and twist between walls, color saturation and brightness, wall color cycle speed, hit flash, glow strength and size, trail opacity, outline width and color, and particle speed, lifetime, size and gravity
 - **Sound:** note order (forward, reverse, ping-pong, random), harder hits play louder, stereo panning by ball position
 
@@ -73,6 +74,7 @@ What it adjusts in each mode:
 | Breakable wall | hits per segment |
 | Line battle | no-deaths period |
 | Polygon | speed |
+| Ball crusher | crush speed (or crush per bounce, or hook spin) |
 
 You can choose to adjust only the speed or only the seed instead. Territory battle never ends on its own, so it can't be fitted.
 

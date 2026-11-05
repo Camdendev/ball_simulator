@@ -22,6 +22,7 @@ DIRS12 = [(math.cos(k * TAU / 12), math.sin(k * TAU / 12)) for k in range(12)]
 CIRCLE_MODES = {'escape', 'rings', 'grow', 'lines', 'shrink', 'multiply', 'segments'}
 # Modes where a ball leaving the arena triggers `escape_action`.
 EXIT_MODES = {'escape', 'segments', 'polygon'}
+CRUSH_TYPES = ('press', 'vice', 'compactor', 'hooks')
 
 
 def norm_angle(a):
@@ -30,7 +31,7 @@ def norm_angle(a):
 
 class Ball:
     __slots__ = ('id', 'team', 'x', 'y', 'vx', 'vy', 'r', 'hue', 'trail',
-                 'passing', 'escaped', 'frozen', 'bounces', 'lines', 'dead')
+                 'passing', 'escaped', 'frozen', 'bounces', 'lines', 'dead', 'squash', 'sq_ang')
 
     def __init__(self, id, team, x, y, vx, vy, r, hue):
         self.id, self.team = id, team
@@ -39,6 +40,8 @@ class Ball:
         self.passing = self.escaped = self.frozen = self.dead = False
         self.bounces = 0
         self.lines = 0
+        self.squash = 0.0   # 0 = round, towards 1 = flattened (crusher mode)
+        self.sq_ang = None  # squeeze direction in radians, for squeezes at any angle (hooks)
 
 
 class Ring:
@@ -61,6 +64,14 @@ class Line:
 
     def __init__(self, ax, ay, owner, hue):
         self.ax, self.ay, self.owner, self.hue = ax, ay, owner, hue
+
+
+class Crusher:
+    """Crusher state. Box types: frame L0..B0 (before rotation by `rot`),
+    heads that have moved `d` in from their wall (meeting in the middle at
+    d = half). Hooks: round wall of radius Rw, a hub and N curved arms."""
+    __slots__ = ('kind', 'half', 'L0', 'R0', 'T0', 'B0', 'hw', 'd', 'goal', 'vd', 'phase', 'timer', 'rounds',
+                 'flash', 'crushed', 'blocks', 'rot', 'w', 'time', 'Rw', 'hub', 'angs', 'omegas', 'arms')
 
 
 class Particle:
@@ -144,10 +155,15 @@ class Sim:
         self.grid = None
         self.next_id = 0
         self.roster = []
+        self.start_max = 0
+        self.crusher = None
 
         mode = c['mode']
         if mode == 'battle':
             self._init_battle()
+            return
+        if mode == 'crusher':
+            self._init_crusher()
             return
         gap0 = -math.radians(float(c['gap_start']))  # 90 = top
         # Nested walls: index 0 is the innermost. Balls are always inside the
@@ -173,6 +189,7 @@ class Sim:
         self.roster = list(self.balls)
         if mode == 'lines':
             self._starting_lines()
+            self.start_max = max((b.lines for b in self.balls), default=0)
 
     def _starting_lines(self):
         """Pre-place each ball's lines on the wall according to the layout setting."""
@@ -205,6 +222,16 @@ class Sim:
                 R0 = self.rings[0].r
                 self.lines.append(Line(self.cx + math.cos(a) * R0, self.cy + math.sin(a) * R0, b, b.hue))
                 b.lines += 1
+
+    @staticmethod
+    def win_target(c, start_max):
+        """Lines needed to win. At least half of `win_lines` always has to be
+        earned on top of the biggest starting count, so a ball that starts
+        near (or above) the target can't win on its first bounce."""
+        need = int(c['win_lines'])
+        if need <= 0:
+            return 0
+        return max(need, start_max + (need + 1) // 2)
 
     def _start_point(self, region, r):
         c, rng = self.cfg, self.rng
@@ -334,6 +361,8 @@ class Sim:
             h = dt / n
             if self.p.mode == 'battle':
                 sub = self._battle_sub
+            elif self.p.mode == 'crusher':
+                sub = self._crush_sub
             elif self.p.mode == 'polygon':
                 sub = self._poly_sub
             else:
@@ -352,6 +381,8 @@ class Sim:
         for r in self.rings:
             if r.flash > 0:
                 r.flash = max(0.0, r.flash - decay)
+        if self.crusher and self.crusher.flash > 0:
+            self.crusher.flash = max(0.0, self.crusher.flash - decay)
 
         if self.particles:
             keep = []
@@ -805,7 +836,7 @@ class Sim:
 
     def _check_line_win(self, b):
         """First ball to hold `win_lines` lines wins (0 = off)."""
-        need = int(self.cfg['win_lines'])
+        need = self.win_target(self.cfg, self.start_max)
         if need > 0 and len(self.roster) > 1 and b.lines >= need and not self.finished:
             self.banner_color = self.ball_color(b)
             self._finish(self.cfg['end_text'] or f'{self.team_name(b.team).upper()} WINS!')
@@ -854,6 +885,429 @@ class Sim:
                 b.y, b.vy = y0 + r, abs(b.vy)
             if b.y + r > y1:
                 b.y, b.vy = y1 - r, -abs(b.vy)
+
+    # ------------------------------------------------------------- crusher
+    # Box types: blocks that cover part of a wall slide in and meet in the
+    # middle (press: top + bottom, vice: left + right, compactor: all four),
+    # then pull back and go again, a little faster each round.
+    # Hooks: round arena with a hub and two curved arms.
+    def _init_crusher(self):
+        c = self.cfg
+        th = float(c['ring_thickness'])
+        kind = c['crush_type'] if c['crush_type'] in CRUSH_TYPES else 'press'
+        room = min(self.W / 2, self.H / 2) - th - 8
+        if kind != 'hooks' and float(c['crush_spin']) != 0:
+            room /= math.sqrt(2)  # a spinning square needs room for its corners
+        half = max(60.0, min(float(c['arena_radius']), room))
+        cr = Crusher()
+        cr.kind = kind
+        cr.half = half
+        cr.L0, cr.R0 = self.cx - half, self.cx + half
+        cr.T0, cr.B0 = self.cy - half, self.cy + half
+        r = float(c['ball_radius'])
+        # leave room beside a head for a ball to slip past
+        cr.hw = max(10.0, min(float(c['crush_width']) / 2, half - 2.6 * r))
+        cr.d = cr.goal = cr.vd = 0.0
+        cr.phase, cr.timer, cr.rounds = 'close', 0.0, 0
+        cr.flash = 0.0
+        cr.crushed = 0
+        cr.blocks = []
+        cr.rot = cr.w = cr.time = 0.0
+        cr.Rw, cr.hub = half, half * 0.12
+        n = max(2, int(c['hook_count']))
+        cr.angs = [-math.pi / 2 + i * TAU / n for i in range(n)]
+        cr.omegas = [0.0] * n
+        cr.arms = []
+        self.crusher = cr
+        count = max(1, int(c['ball_count']))
+        hooks = cr.kind == 'hooks'
+        for i in range(count):
+            b = self._spawn(i, count, half * 0.8)
+            # start in a corner pocket / between two arms, clear of the moving parts
+            if hooks:
+                a = -math.pi / 2 + ((i % n) + 0.5) * TAU / n + (self.rng.random() - 0.5) * 0.6 * TAU / n
+                d = half * (0.35 + 0.3 * self.rng.random())
+            else:
+                a = math.pi / 4 + (i % 4) * math.pi / 2 + (self.rng.random() - 0.5) * 0.5
+                d = half * (0.55 + 0.2 * self.rng.random())
+            b.x, b.y = self.cx + math.cos(a) * d, self.cy + math.sin(a) * d
+            self.balls.append(b)
+        self.roster = list(self.balls)
+        if hooks:
+            self._hook_arms()
+        else:
+            self._crusher_blocks()
+
+    def _crusher_blocks(self):
+        """Rebuild the crusher parts (in the un-rotated frame): each one is a
+        flat platform (the head) pushed out on a thin rod.
+        Rectangles: (x0, y0, x1, y1, vx, vy, wall side, 'plate'|'rod')."""
+        cr = self.crusher
+        d, v, hw, cx, cy = cr.d, cr.vd, cr.hw, self.cx, self.cy
+        P = max(10.0, float(self.cfg['ring_thickness']) * 1.4)  # platform thickness
+        rw = max(3.0, P * 0.3)                                   # rod half-width
+        back = max(0.0, d - P)                                   # platform's back face
+        sides = {'press': 'TB', 'vice': 'LR'}.get(cr.kind, 'TBLR')
+        out = []
+        for sd in sides:
+            if sd == 'T':
+                out.append((cx - hw, cr.T0 + back - 1, cx + hw, cr.T0 + d, 0.0, v, sd, 'plate'))
+                out.append((cx - rw, cr.T0 - 1, cx + rw, cr.T0 + back, 0.0, v, sd, 'rod'))
+            elif sd == 'B':
+                out.append((cx - hw, cr.B0 - d, cx + hw, cr.B0 - back + 1, 0.0, -v, sd, 'plate'))
+                out.append((cx - rw, cr.B0 - back, cx + rw, cr.B0 + 1, 0.0, -v, sd, 'rod'))
+            elif sd == 'L':
+                out.append((cr.L0 + back - 1, cy - hw, cr.L0 + d, cy + hw, v, 0.0, sd, 'plate'))
+                out.append((cr.L0 - 1, cy - rw, cr.L0 + back, cy + rw, v, 0.0, sd, 'rod'))
+            else:
+                out.append((cr.R0 - d, cy - hw, cr.R0 - back + 1, cy + hw, -v, 0.0, sd, 'plate'))
+                out.append((cr.R0 - back, cy - rw, cr.R0 + 1, cy + rw, -v, 0.0, sd, 'rod'))
+        cr.blocks = [b for b in out if b[2] > b[0] and b[3] > b[1]]
+
+    def _crush_ramp(self):
+        """Speed multiplier for the current round."""
+        c, cr = self.cfg, self.crusher
+        return min(max(1.0, float(c['crush_ramp_max'])), (1 + float(c['crush_ramp']) / 100) ** cr.rounds)
+
+    def _crusher_move(self, h):
+        c, cr = self.cfg, self.crusher
+        cr.time += h
+        if cr.kind == 'hooks':
+            base = math.radians(float(c['hook_speed']) + float(c['hook_accel']) * cr.time)
+            flip = float(c['hook_flip'])
+            if flip > 0 and int(cr.time / flip) % 2:
+                base = -base  # everything reverses every `flip` seconds
+            n = len(cr.angs)
+            for i in range(n):
+                if c['hook_style'] == 'scissor':
+                    w = base if i % 2 == 0 else -base
+                else:  # chase: each arm a bit slower than the one before
+                    w = base * (1 - 0.6 * i / max(1, n - 1))
+                cr.omegas[i] = w
+                cr.angs[i] += w * h
+            self._hook_arms()
+            return
+        cr.w = math.radians(float(c['crush_spin']))
+        cr.rot += cr.w * h
+        speed = float(c['crush_speed']) * self._crush_ramp()
+        dmax = cr.half
+        f = cr.d / dmax
+        motion = c['crush_motion']
+        if motion == 'smooth':      # eases in and out
+            mf = 0.25 + 1.5 * math.sin(math.pi * f)
+        elif motion == 'slam':      # creeps, then slams
+            mf = 0.2 + 3.5 * f * f
+        elif motion == 'pulse':     # stop-start throbbing
+            mf = 0.15 + 1.85 * (0.5 + 0.5 * math.sin(cr.time * 9))
+        else:
+            mf = 1.0
+        old = cr.d
+        if cr.phase == 'close':
+            if c['crush_trigger'] == 'time':
+                cr.goal += speed * mf * h
+            elif any(b.squash > 0 for b in self.balls):
+                cr.goal += max(20.0, float(c['crush_step']) * 4) * h  # pinned balls can't bounce
+            cr.goal = min(cr.goal, dmax)
+            cr.d = min(cr.goal, cr.d + max(speed * mf, 700.0) * h)
+            if cr.d >= dmax:
+                cr.phase = 'open'  # straight back out, no pause
+                cr.flash = 1.0
+                self._burst(self.cx, self.cy, self.crusher_color(), 16, 450)
+                self._hit(self.cx, 1400.0)
+        else:  # open: pull back, then start the next (faster) round
+            cr.d = max(0.0, cr.d - max(speed * mf * float(c['crush_open']) / 100, 60.0) * h)
+            if cr.d <= 0:
+                cr.d = cr.goal = 0.0
+                cr.phase = 'close'
+                cr.rounds += 1
+        cr.vd = (cr.d - old) / h if h > 0 else 0.0
+        self._crusher_blocks()
+
+    # Spinning hooks -------------------------------------------------------
+    def _hook_arms(self):
+        """Rebuild the arms as polylines: [(points, angular velocity)].
+        Each arm curls towards its tip; in the scissor style every other arm
+        curls the other way so neighbours cross like blades."""
+        c, cr = self.cfg, self.crusher
+        curl = math.radians(float(c['hook_curve']))
+        r0 = cr.hub * 0.6
+        L = r0 + (cr.Rw - 3.0 - r0) * max(0.1, min(1.0, float(c['hook_length']) / 100))
+        n = 14 + int(abs(curl) * 4)
+        mirror = c['hook_style'] == 'scissor'
+        arms = []
+        for i, (base, w) in enumerate(zip(cr.angs, cr.omegas)):
+            sgn = -1 if (mirror and i % 2) else 1
+            pts = []
+            for k in range(n + 1):
+                f = k / n
+                rho = r0 + (L - r0) * f
+                a = base + sgn * curl * f * f
+                pts.append((self.cx + math.cos(a) * rho, self.cy + math.sin(a) * rho))
+            arms.append((pts, w))
+        cr.arms = arms
+
+    def _contacts(self, b, half_t, x=None, y=None):
+        """Surfaces near ball b: (distance from its centre to the surface,
+        normal from the ball towards it, surface velocity, contact point, kind,
+        head id). Only two *different heads* facing each other can crush."""
+        cr = self.crusher
+        out = []
+        reach = b.r * 1.5
+        x = b.x if x is None else x
+        y = b.y if y is None else y
+        cx, cy = self.cx, self.cy
+        if cr.kind != 'hooks':
+            # work in the crusher's own (un-rotated) frame
+            co, si = math.cos(cr.rot), math.sin(cr.rot)
+            dx, dy = x - cx, y - cy
+            lx, ly = cx + dx * co + dy * si, cy - dx * si + dy * co
+            loc = []
+            for s_, nx, ny, qx, qy in ((ly - cr.T0, 0.0, -1.0, lx, cr.T0), (cr.B0 - ly, 0.0, 1.0, lx, cr.B0),
+                                       (lx - cr.L0, -1.0, 0.0, cr.L0, ly), (cr.R0 - lx, 1.0, 0.0, cr.R0, ly)):
+                if s_ < reach:
+                    loc.append((s_, nx, ny, 0.0, 0.0, qx, qy, 0, None))
+            for x0, y0, x1, y1, vx, vy, sd, part in cr.blocks:
+                qx = x0 if lx < x0 else x1 if lx > x1 else lx
+                qy = y0 if ly < y0 else y1 if ly > y1 else ly
+                ex, ey = qx - lx, qy - ly
+                q = math.sqrt(ex * ex + ey * ey)
+                if q >= reach:
+                    continue
+                kind = 2 if part == 'plate' else 1
+                if q > 1e-6:
+                    loc.append((q, ex / q, ey / q, vx, vy, qx, qy, kind, sd))
+                else:  # centre inside: push out through the nearest face
+                    faces = ((lx - x0, 1.0, 0.0), (x1 - lx, -1.0, 0.0), (ly - y0, 0.0, 1.0), (y1 - ly, 0.0, -1.0))
+                    dist, nx, ny = min(faces)
+                    loc.append((-dist, nx, ny, vx, vy, lx, ly, kind, sd))
+            if not cr.rot and not cr.w:
+                return loc
+            w = cr.w
+            for s_, nx, ny, vx, vy, qx, qy, kind, hid in loc:
+                rx, ry = qx - cx, qy - cy
+                wx, wy = rx * co - ry * si, rx * si + ry * co  # contact point, world (relative)
+                out.append((s_, nx * co - ny * si, nx * si + ny * co,
+                            vx * co - vy * si - w * wy, vx * si + vy * co + w * wx,
+                            cx + wx, cy + wy, kind, hid))
+            return out
+        dx, dy = x - cx, y - cy
+        d = math.sqrt(dx * dx + dy * dy) or 1e-6
+        ux, uy = dx / d, dy / d
+        if cr.Rw - d < reach:  # outer wall
+            out.append((cr.Rw - d, ux, uy, 0.0, 0.0, cx + ux * cr.Rw, cy + uy * cr.Rw, 0, None))
+        if d - cr.hub < reach:  # hub
+            out.append((d - cr.hub, -ux, -uy, 0.0, 0.0, cx + ux * cr.hub, cy + uy * cr.hub, 0, None))
+        for k, (pts, w) in enumerate(cr.arms):
+            best = None
+            for i in range(len(pts) - 1):
+                ax, ay = pts[i]
+                bx, by = pts[i + 1]
+                ex, ey = bx - ax, by - ay
+                l2 = ex * ex + ey * ey or 1e-9
+                t = ((x - ax) * ex + (y - ay) * ey) / l2
+                t = 0.0 if t < 0 else 1.0 if t > 1 else t
+                qx, qy = ax + ex * t, ay + ey * t
+                q2 = (x - qx) ** 2 + (y - qy) ** 2
+                if best is None or q2 < best[0]:
+                    best = (q2, qx, qy)
+            q = math.sqrt(best[0])
+            if q - half_t < reach:
+                qx, qy = best[1], best[2]
+                nx, ny = ((qx - x) / q, (qy - y) / q) if q > 1e-6 else (-ux, -uy)
+                rx, ry = qx - cx, qy - cy
+                out.append((q - half_t, nx, ny, -w * ry, w * rx, qx, qy, 2, k))
+        return out
+
+    def _crush_sub(self, h):
+        p, c = self.p, self.cfg
+        self._crusher_move(h)
+        self._integrate(h)
+        if p.collide:
+            self._collide_balls()
+        limit = float(c['crush_limit']) / 100
+        half_t = max(6.0, float(c['ring_thickness']) * 1.2)
+        dead = False
+        for b in self.balls:
+            if b.frozen:
+                continue
+            r = b.r
+            cs = self._contacts(b, half_t)
+            pinch = None
+            stuck = False  # squeezed by something that isn't allowed to crush
+            for i in range(len(cs)):
+                for j in range(i + 1, len(cs)):
+                    s1, s2 = cs[i], cs[j]
+                    if s1[1] * s2[1] + s1[2] * s2[2] >= -0.3:
+                        continue  # not facing each other
+                    gap = s1[0] + s2[0]
+                    if gap >= 2 * r:
+                        continue
+                    if s1[7] == 2 and s2[7] == 2 and s1[8] != s2[8]:
+                        if pinch is None or gap < pinch[0]:
+                            pinch = (gap, s1, s2)
+                    else:
+                        stuck = True
+            if pinch:  # caught between two crusher heads: squash
+                gap, s1, s2 = pinch
+                shift = s1[0] - gap / 2  # centre the ball between the two
+                b.x += s1[1] * shift
+                b.y += s1[2] * shift
+                b.vx, b.vy = (s1[3] + s2[3]) / 2, (s1[4] + s2[4]) / 2
+                sq = max(0.0, gap) / (2 * r)
+                b.squash = 1.0 - sq
+                b.sq_ang = math.atan2(s1[2], s1[1])
+                if sq < limit:
+                    b.dead = dead = True
+                continue
+            b.squash = 0.0
+            if stuck:
+                # trapped against a wall: the wall wins and the crusher passes through the ball
+                cs = [x for x in cs if x[7] == 0]
+            for s_, nx, ny, wx, wy, qx, qy, _, _ in cs:
+                if s_ < r:
+                    pen = r - s_
+                    b.x -= nx * pen
+                    b.y -= ny * pen
+                    self._crush_wall(b, nx, ny, wx, wy, qx, qy)
+        if dead:
+            self._crush_pop([b for b in self.balls if b.dead])
+
+    def _crush_wall(self, b, nx, ny, wx, wy, px, py):
+        """Bounce off a (possibly moving) surface; (nx, ny) points from the ball into it."""
+        vn = (b.vx - wx) * nx + (b.vy - wy) * ny
+        if vn <= 0:
+            return
+        self._reflect(b, nx, ny, vn)
+        if vn > self.p.min_bounce:
+            c, p, cr = self.cfg, self.p, self.crusher
+            self.hits += 1
+            b.bounces += 1
+            cr.flash = max(cr.flash, 0.6)
+            if p.rainbow:
+                b.hue = (b.hue + p.hue_step) % 360
+            if c['crush_trigger'] == 'bounce' and cr.kind != 'hooks' and cr.phase == 'close':
+                cr.goal += float(c['crush_step']) * self._crush_ramp()
+            grow = float(c['crush_grow'])
+            if grow > 0:  # balls swell on every bounce: easier to catch
+                b.r = min(b.r + grow, cr.half * 0.4)
+            self._burst(px, py, self.ball_color(b), 6, 250)
+            self._hit(px, vn)
+
+    def _crush_pop(self, victims):
+        c, cr = self.cfg, self.crusher
+        action = c['crush_action']
+        pieces = int(c['crush_pieces'])
+        cap = int(c['max_balls'])
+        alive = sum(1 for b in self.balls if not b.dead)
+        for b in victims:
+            cr.crushed += 1
+            self._burst(b.x, b.y, self.ball_color(b), 40, 650)
+            if action == 'multiply':
+                for k in range(pieces):
+                    if alive >= cap:
+                        break
+                    nb = self._crush_spawn(b, k)
+                    if nb:
+                        alive += 1
+                continue
+            nr = b.r * 0.7
+            if action == 'pieces' and pieces > 0 and nr >= 6:
+                # squirt out sideways from between the jaws
+                tx, ty = -math.sin(b.sq_ang or 0.0), math.cos(b.sq_ang or 0.0)
+                off = (cr.hw if cr.kind != 'hooks' else 0.0) + nr + 2
+                for k in range(pieces):
+                    side = -1 if k % 2 == 0 else 1
+                    x, y = b.x + tx * side * off, b.y + ty * side * off
+                    ox, oy = x - self.cx, y - self.cy
+                    od = math.hypot(ox, oy)
+                    lim = cr.half - nr  # keep inside the (possibly rotated) arena
+                    if od > lim > 0:
+                        x, y = self.cx + ox * lim / od, self.cy + oy * lim / od
+                    sp = 500 + self.rng.random() * 300
+                    a = math.atan2(ty * side, tx * side) + (self.rng.random() - 0.5) * 1.2
+                    nb = Ball(self.next_id, b.team, x, y, math.cos(a) * sp, math.sin(a) * sp, nr,
+                              (b.hue + 40 * (k + 1)) % 360)
+                    self.next_id += 1
+                    self.balls.append(nb)
+        self.balls = [b for b in self.balls if not b.dead]
+        self._hit(victims[0].x, 1500.0)
+        if not self.balls:
+            self._finish(c['end_text'] or 'CRUSHED!')
+        elif action == 'multiply' and len(self.balls) >= cap:
+            self._finish(c['end_text'] or f'{cap} BALLS!')
+
+    def _in_sweep(self, lx, ly, r):
+        """Is local point (lx, ly) (relative to the centre, un-rotated) in the
+        path of a box crusher's heads?"""
+        cr = self.crusher
+        pad = cr.hw + r
+        if cr.kind in ('press', 'compactor') and abs(lx) < pad:
+            return True
+        if cr.kind in ('vice', 'compactor') and abs(ly) < pad:
+            return True
+        return False
+
+    def _crush_spawn(self, src, k):
+        """Multiply: a new full-size ball bursts out of squished ball `src`,
+        sideways out of the jaws. Falls back to a random clear spot out of
+        the crusher's path. Returns the ball, or None if there's no room."""
+        c, cr, rng = self.cfg, self.crusher, self.rng
+        r = src.r
+        half_t = max(6.0, float(c['ring_thickness']) * 1.2)
+        nb = Ball(self.next_id, src.team, src.x, src.y, 0.0, 0.0, r, (src.hue + 40 * (k + 1)) % 360)
+        collide = self.p.collide
+        co, si = math.cos(cr.rot), math.sin(cr.rot)
+
+        def clear():
+            if any(s_ < r + 1 for s_, *_ in self._contacts(nb, half_t)):
+                return False
+            return not collide or all(math.hypot(o.x - nb.x, o.y - nb.y) > o.r + r
+                                      for o in self.balls if not o.dead and o is not nb)
+
+        side = -1 if k % 2 == 0 else 1
+        tx, ty = -math.sin(src.sq_ang or 0.0), math.cos(src.sq_ang or 0.0)
+        out_a = math.atan2(ty * side, tx * side)
+        # 1) out the side of the jaws, a little further each try
+        base = (cr.hw if cr.kind != 'hooks' else r) + r + 4
+        ok = False
+        for step in range(8):
+            off = base + step * r * 0.6 + (k // 2) * r * 2.2
+            a = out_a + (rng.random() - 0.5) * 0.3 * step
+            nb.x, nb.y = src.x + math.cos(a) * off, src.y + math.sin(a) * off
+            if clear():
+                ok = True
+                break
+        # 2) anywhere clear (box: out of the heads' path)
+        for _ in range(0 if ok else 60):
+            if cr.kind == 'hooks':
+                a = rng.random() * TAU
+                d = cr.hub + r + rng.random() * max(1.0, cr.Rw - cr.hub - 2 * r)
+                nb.x, nb.y = self.cx + math.cos(a) * d, self.cy + math.sin(a) * d
+            else:
+                lim = max(0.0, cr.half - r)
+                lx, ly = (rng.random() * 2 - 1) * lim, (rng.random() * 2 - 1) * lim
+                if self._in_sweep(lx, ly, r):
+                    continue
+                nb.x, nb.y = self.cx + lx * co - ly * si, self.cy + lx * si + ly * co
+            if clear():
+                ok = True
+                out_a = rng.random() * TAU
+                break
+        if not ok:
+            return None
+        sp = float(c['spawn_speed']) or float(c['speed'])
+        a = out_a + (rng.random() - 0.5) * 0.8
+        nb.vx, nb.vy = math.cos(a) * sp, math.sin(a) * sp
+        self.next_id += 1
+        self.balls.append(nb)
+        self._burst(nb.x, nb.y, self.ball_color(nb), 10, 300)
+        return nb
+
+    def crusher_color(self):
+        c = self.cfg
+        if c['ring_color_mode'] == 'solid':
+            return hex_rgb(c['ring_color'])
+        return self.hue_color(self.t * self.p.rainbow_speed)
 
     def _burst(self, x, y, color, n, speed):
         amt = self.p.particles
@@ -915,6 +1369,8 @@ class Sim:
                 sep = '   ' if i < len(self.roster) - 1 else ''
                 segs.append((f'{self.team_name(b.team)} {"OUT" if b.dead else b.lines}{sep}', col))
             return segs
+        if mode == 'crusher':
+            return [(f'Balls: {len(self.balls)}    Crushed: {self.crusher.crushed}', white)]
         if mode == 'battle':
             a, b = self.grid.counts
             return [(f'{self.team_name(0)} {a}', self.team_color(0)), ('   vs   ', white),
@@ -925,5 +1381,10 @@ class Sim:
         """Top and bottom y of the arena (world units), for text placement."""
         if self.grid:
             return self.grid.y0, self.grid.y0 + self.grid.S
+        th = float(self.cfg['ring_thickness'])
+        if self.crusher:
+            spin = self.crusher.kind != 'hooks' and float(self.cfg['crush_spin']) != 0
+            ext = (self.crusher.half + th) * (math.sqrt(2) - 1) if spin else 0.0  # rotated corners reach further
+            return self.crusher.T0 - th - ext, self.crusher.B0 + th + ext
         th = float(self.cfg['ring_thickness'])
         return self.cy - self.R - th, self.cy + self.R + th

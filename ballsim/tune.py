@@ -25,6 +25,7 @@ MODE_PARAM = {
     'grow': ('growth', 'growth per bounce', 0.2, 30, False, True),
     'shrink': ('shrink', 'shrink per bounce', 0.5, 60, False, True),
     'multiply': ('multiply_chance', 'multiply chance', 0.05, 1.0, False, True),
+    'crusher': ('crush_speed', 'crush speed', 5, 600, True, True),
     'lines': ('eliminate_after', 'no-deaths period', 0, 'target', False, False),
 }
 SPEED_PARAM = ('time_scale', 'speed', 0.3, 2.0, False, True)
@@ -61,6 +62,10 @@ class Tuner:
         elif cfg['mode'] == 'lines' and cfg['line_cut_action'] != 'destroy' and int(cfg['win_lines']) > 0:
             # with stealing nobody runs out, so the match length is set by the win target
             self.param = ('win_lines', 'lines to win', 5, max(10, int(cfg['max_lines'])), True, False)
+        elif cfg['mode'] == 'crusher' and cfg['crush_type'] == 'hooks':
+            self.param = ('hook_speed', 'hook spin', 10, 540, True, True)
+        elif cfg['mode'] == 'crusher' and cfg['crush_trigger'] == 'bounce':
+            self.param = ('crush_step', 'crush per bounce', 1, 120, True, True)
         else:
             self.param = MODE_PARAM.get(cfg['mode'], SPEED_PARAM)
         self.try_seeds = bool(cfg['tune_seed']) or self.param is None

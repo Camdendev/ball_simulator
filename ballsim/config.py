@@ -62,6 +62,27 @@ DEFAULTS = {
     'shrink': 6.0,
     'shrink_stop': 1.15,
     'multiply_chance': 0.5,
+    'crush_type': 'press',
+    'crush_trigger': 'time',
+    'crush_motion': 'steady',
+    'crush_speed': 120,
+    'crush_step': 15,
+    'crush_open': 250,
+    'crush_ramp': 15,
+    'crush_ramp_max': 4,
+    'crush_spin': 0,
+    'crush_limit': 50,
+    'crush_grow': 0,
+    'crush_action': 'none',
+    'crush_pieces': 2,
+    'crush_width': 420,
+    'hook_count': 2,
+    'hook_style': 'scissor',
+    'hook_speed': 60,
+    'hook_accel': 0,
+    'hook_flip': 0,
+    'hook_curve': 70,
+    'hook_length': 60,
     # Arena
     'arena_radius': 486,
     'arena_offset': 0,
@@ -178,8 +199,20 @@ MODE_PRESETS = {
                      seg_hp=2, escape_action='finish', trail=6, title='Every hit cracks the wall'),
     'lines': dict(wall_count=1, gravity=500, speed=700, ball_radius=26, ball_count=2, trail=0, start_lines=3,
                   title='Red vs Blue'),
+    'crusher': dict(gravity=900, speed=700, ball_radius=45, ball_count=3, trail=4, crush_type='press', max_balls=40,
+                    title="Don't get caught in the middle"),
     'battle': dict(speed=1500, ball_radius=14, ball_count=1, trail=0, grid_size=24,
                    title='Territory battle'),
+}
+
+
+# Default titles per crusher type (swapped in when the type changes, unless
+# the user has written their own title).
+CRUSH_TITLES = {
+    'press': 'Don\'t get caught in the middle',
+    'vice': 'The walls are closing in',
+    'compactor': 'Four-way crusher',
+    'hooks': 'Caught in the hooks',
 }
 
 
@@ -192,7 +225,26 @@ def load_config(path):
             cfg.update({k: v for k, v in data.items() if k in DEFAULTS})
         except (OSError, ValueError) as e:
             print(f'Could not read {path}: {e}')
+    _drop_missing_files(cfg)
+    if cfg['crush_type'] not in CRUSH_TITLES:  # e.g. a type that was removed
+        cfg['crush_type'] = DEFAULTS['crush_type']
+    if 0 < float(cfg['crush_limit']) < 1:  # older configs stored this as a fraction
+        cfg['crush_limit'] = int(round(float(cfg['crush_limit']) * 100))
     return cfg
+
+
+def _drop_missing_files(cfg):
+    """Forget saved song files that were moved or deleted, so startup never
+    tries to open a path that no longer exists."""
+    for key, source in (('midi_path', 'midi'), ('audio_path', 'audio')):
+        p = cfg.get(key)
+        if p and not os.path.exists(p):
+            print(f'Saved file no longer exists, ignoring: {p}')
+            cfg[key] = DEFAULTS[key]
+            if key == 'midi_path':
+                cfg['midi_track'] = DEFAULTS['midi_track']
+            if cfg.get('song_source') == source:
+                cfg['song_source'] = DEFAULTS['song_source']
 
 
 def save_config(cfg, path):

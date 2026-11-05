@@ -59,6 +59,9 @@ class Panel:
         self.focus = None
         self.edit = ''
         self.fresh = False
+        self.cursor = 0       # caret position in self.edit
+        self.view = 0         # first visible character of a scrolled text field
+        self.blink0 = 0
         self.dropdown = None  # (def, anchor rect, scroll)
         self.rows = []
         self.content_h = 0
@@ -150,15 +153,21 @@ class Panel:
                 pygame.draw.rect(surf, FIELD_HOVER if (vhover or focused) else FIELD, vbox, border_radius=int(5 * k))
                 if focused:
                     pygame.draw.rect(surf, ACCENT, vbox, max(1, int(k)), border_radius=int(5 * k))
-                    txt = self._clip(self.font, self.edit, vbox.w - int(14 * k), tail=True) + '|'
+                    tx = self._num_x(vbox)
                     if self.fresh:  # whole value selected: typing replaces it
-                        sel = pygame.Rect(0, 0, self.font.size(self.edit)[0] + int(4 * k), vbox.h - int(8 * k))
-                        sel.midright = (vbox.right - int(10 * k), vbox.centery)
+                        sel = pygame.Rect(tx - int(2 * k), vbox.y + int(4 * k), self.font.size(self.edit)[0] + int(4 * k),
+                                          vbox.h - int(8 * k))
                         pygame.draw.rect(surf, (70, 90, 170), sel.clip(vbox), border_radius=int(3 * k))
+                    old_clip = surf.get_clip()
+                    surf.set_clip(vbox.inflate(-int(4 * k), 0))
+                    t = self.font.render(self.edit, True, FG)
+                    surf.blit(t, (tx, vbox.centery - t.get_height() // 2))
+                    if not self.fresh:
+                        self._draw_caret(surf, tx + self.font.size(self.edit[:self.cursor])[0], vbox)
+                    surf.set_clip(old_clip)
                 else:
-                    txt = self._clip(self.font, _fmt(v, d['step']), vbox.w - int(10 * k))
-                t = self.font.render(txt, True, FG)
-                surf.blit(t, (vbox.right - t.get_width() - int(6 * k), vbox.centery - t.get_height() // 2))
+                    t = self.font.render(self._clip(self.font, _fmt(v, d['step']), vbox.w - int(10 * k)), True, FG)
+                    surf.blit(t, (vbox.right - t.get_width() - int(6 * k), vbox.centery - t.get_height() // 2))
             elif kind in ('choice', 'color'):
                 pygame.draw.rect(surf, FIELD_HOVER if hover else FIELD, cr, border_radius=rad)
                 x = cr.x + int(10 * k)
@@ -186,10 +195,22 @@ class Panel:
                 pygame.draw.rect(surf, FIELD_HOVER if (hover or focused) else FIELD, cr, border_radius=rad)
                 if focused:
                     pygame.draw.rect(surf, ACCENT, cr, max(1, int(k)), border_radius=rad)
-                txt = self.edit if focused else str(v)
-                t = self.font.render(self._clip(self.font, txt, cr.w - int(20 * k), tail=focused) + ('|' if focused else ''),
-                                     True, FG)
-                surf.blit(t, (cr.x + int(8 * k), cr.centery - t.get_height() // 2))
+                    maxw = self._text_w(cr)
+                    self._scroll_view(maxw)
+                    old_clip = surf.get_clip()
+                    surf.set_clip(pygame.Rect(cr.x + int(8 * k), cr.y, maxw + int(2 * k), cr.h))
+                    t = self.font.render(self.edit[self.view:], True, FG)
+                    x0 = cr.x + int(8 * k)
+                    if self.fresh and self.edit:  # select-all highlight
+                        pygame.draw.rect(surf, (70, 90, 170), (x0 - int(2 * k), cr.y + int(4 * k), t.get_width() + int(4 * k),
+                                                               cr.h - int(8 * k)), border_radius=int(3 * k))
+                    surf.blit(t, (x0, cr.centery - t.get_height() // 2))
+                    if not self.fresh:
+                        self._draw_caret(surf, x0 + self.font.size(self.edit[self.view:self.cursor])[0], cr)
+                    surf.set_clip(old_clip)
+                else:
+                    t = self.font.render(self._clip(self.font, str(v), cr.w - int(20 * k)), True, FG)
+                    surf.blit(t, (cr.x + int(8 * k), cr.centery - t.get_height() // 2))
 
         if self.content_h > H:
             bar_h = max(30 * k, H * H / self.content_h)
@@ -198,6 +219,111 @@ class Panel:
 
         if self.dropdown:
             self._draw_dropdown(surf)
+
+    # ----------------------------------------------------------- text caret
+    def _text_w(self, cr):
+        return cr.w - int(18 * self.k)
+
+    def _num_x(self, vbox):
+        """Left x of the (right-aligned) text in a focused number box."""
+        return vbox.right - int(6 * self.k) - self.font.size(self.edit)[0]
+
+    def _scroll_view(self, maxw):
+        """Scroll a long text field sideways so the caret stays visible."""
+        f, e = self.font, self.edit
+        self.view = min(self.view, self.cursor)
+        while self.view < self.cursor and f.size(e[self.view:self.cursor])[0] > maxw:
+            self.view += 1
+        while self.view > 0 and f.size(e[self.view - 1:])[0] <= maxw:
+            self.view -= 1
+
+    def _draw_caret(self, surf, x, box):
+        if (pygame.time.get_ticks() - self.blink0) // 530 % 2:
+            return
+        h = self.font.get_height()
+        x = int(x)
+        pygame.draw.line(surf, FG, (x, box.centery - h // 2 + 1), (x, box.centery + h // 2 - 1), max(1, int(1.5 * self.k)))
+
+    def _index_at(self, start, x):
+        """Character index in self.edit nearest to `x` pixels right of edit[start]."""
+        f, e = self.font, self.edit
+        best, best_d = start, abs(x)
+        for i in range(start + 1, len(e) + 1):
+            d = abs(f.size(e[start:i])[0] - x)
+            if d < best_d:
+                best, best_d = i, d
+            elif d > best_d:
+                break
+        return best
+
+    def _start_edit(self, d, text, fresh):
+        self.focus = d
+        self.edit = text
+        self.fresh = fresh
+        self.cursor = len(text)
+        self.view = 0
+        self.blink0 = pygame.time.get_ticks()
+        pygame.key.start_text_input()
+        pygame.key.set_repeat(400, 35)  # hold arrows / backspace to repeat
+
+    def _end_edit(self):
+        self.focus = None
+        pygame.key.stop_text_input()
+        pygame.key.set_repeat()
+
+    def _insert(self, txt):
+        if self.fresh:
+            self.edit, self.cursor, self.fresh = '', 0, False
+        self.edit = self.edit[:self.cursor] + txt + self.edit[self.cursor:]
+        self.cursor += len(txt)
+
+    def _word_left(self):
+        e, i = self.edit, self.cursor
+        while i > 0 and e[i - 1] == ' ':
+            i -= 1
+        while i > 0 and e[i - 1] != ' ':
+            i -= 1
+        return i
+
+    def _word_right(self):
+        e, i = self.edit, self.cursor
+        while i < len(e) and e[i] == ' ':
+            i += 1
+        while i < len(e) and e[i] != ' ':
+            i += 1
+        return i
+
+    def _edit_key(self, key, mods):
+        """Caret movement and deletion. Returns True if the key was handled."""
+        cmd = mods & (pygame.KMOD_META | pygame.KMOD_CTRL)
+        alt = mods & pygame.KMOD_ALT
+        n = len(self.edit)
+        if key == pygame.K_BACKSPACE:
+            if self.fresh:
+                self.edit, self.cursor = '', 0
+            else:
+                i = 0 if cmd else self._word_left() if alt else max(0, self.cursor - 1)
+                self.edit = self.edit[:i] + self.edit[self.cursor:]
+                self.cursor = i
+        elif key == pygame.K_DELETE:
+            if self.fresh:
+                self.edit, self.cursor = '', 0
+            else:
+                j = n if cmd else self._word_right() if alt else min(n, self.cursor + 1)
+                self.edit = self.edit[:self.cursor] + self.edit[j:]
+        elif key == pygame.K_LEFT:
+            self.cursor = 0 if (cmd or self.fresh) else self._word_left() if alt else max(0, self.cursor - 1)
+        elif key == pygame.K_RIGHT:
+            self.cursor = n if (cmd or self.fresh) else self._word_right() if alt else min(n, self.cursor + 1)
+        elif key == pygame.K_HOME:
+            self.cursor = 0
+        elif key == pygame.K_END:
+            self.cursor = n
+        else:
+            return False
+        self.fresh = False
+        self.blink0 = pygame.time.get_ticks()
+        return True
 
     def _caret(self, surf, x, y):
         s = 4 * self.k
@@ -362,19 +488,15 @@ class Panel:
                 txt = e.text
                 if numeric:
                     txt = ''.join(ch for ch in txt if ch in '0123456789.-,eE')
-                if self.fresh:
-                    self.edit = ''
-                    self.fresh = False
-                self.edit += txt
+                self._insert(txt)
+                self.blink0 = pygame.time.get_ticks()
                 return True
             if e.type == pygame.KEYDOWN:
                 mods = pygame.key.get_mods()
-                if e.key == pygame.K_BACKSPACE:
-                    if self.fresh or mods & (pygame.KMOD_META | pygame.KMOD_CTRL):
-                        self.edit = ''
-                    else:
-                        self.edit = self.edit[:-1]
-                    self.fresh = False
+                if self._edit_key(e.key, mods):
+                    pass
+                elif not numeric and e.key in (pygame.K_UP, pygame.K_DOWN):
+                    self._edit_key(pygame.K_HOME if e.key == pygame.K_UP else pygame.K_END, 0)
                 elif numeric and e.key in (pygame.K_UP, pygame.K_DOWN):
                     self._nudge(self.focus, 1 if e.key == pygame.K_UP else -1)
                 elif e.key == pygame.K_TAB:
@@ -388,13 +510,12 @@ class Panel:
                 elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     self._commit()
                 elif e.key == pygame.K_ESCAPE:
-                    self.focus = None
-                    pygame.key.stop_text_input()
+                    self._end_edit()
+                elif e.key == pygame.K_a and mods & (pygame.KMOD_META | pygame.KMOD_CTRL):
+                    self.fresh = True  # select all
+                    self.cursor = len(self.edit)
                 elif e.key == pygame.K_v and mods & (pygame.KMOD_META | pygame.KMOD_CTRL):
-                    if self.fresh:
-                        self.edit = ''
-                        self.fresh = False
-                    self.edit += self._paste()
+                    self._insert(self._paste())
                 return True
         return False
 
@@ -414,12 +535,17 @@ class Panel:
         key = d['key']
         cr = self.ctrl_rect(r)
         if kind == 'slider' and button == 1:
-            if self._slider_parts(cr)[1].collidepoint(pos):
-                self._focus_number(d)
+            vbox = self._slider_parts(cr)[1]
+            if vbox.collidepoint(pos):
+                if self.focus is d:  # already editing: click places the caret
+                    self.cursor = self._index_at(0, pos[0] - self._num_x(vbox))
+                    self.fresh = False
+                    self.blink0 = pygame.time.get_ticks()
+                else:
+                    self._focus_number(d)
             else:
                 if self.focus is d:  # dragging wins over a half-typed number
-                    self.focus = None
-                    pygame.key.stop_text_input()
+                    self._end_edit()
                 self.drag = (d, r)
                 self._slide(d, r, pos[0], final=False)
         elif kind in ('choice', 'color') and cr.collidepoint(pos):
@@ -432,10 +558,10 @@ class Panel:
         elif kind == 'toggle':
             self.app.set(key, not cfg[key], final=True)
         elif kind == 'text':
-            self.focus = d
-            self.edit = str(cfg[key])
-            self.fresh = False
-            pygame.key.start_text_input()
+            if self.focus is not d:
+                self._start_edit(d, str(cfg[key]), fresh=False)
+            self.cursor = self._index_at(self.view, pos[0] - cr.x - int(8 * self.k))
+            self.blink0 = pygame.time.get_ticks()
 
     def _slider_parts(self, cr):
         """(track width, value-box rect) for a slider's control area."""
@@ -445,10 +571,7 @@ class Panel:
 
     def _focus_number(self, d):
         self._commit()
-        self.focus = d
-        self.edit = _fmt(self.app.cfg[d['key']], d['step'])
-        self.fresh = True
-        pygame.key.start_text_input()
+        self._start_edit(d, _fmt(self.app.cfg[d['key']], d['step']), fresh=True)
 
     def _number(self, d, text):
         """Parse typed text into a value within the slider's range, or None."""
@@ -489,8 +612,7 @@ class Panel:
     def _commit(self):
         if self.focus:
             d = self.focus
-            self.focus = None
-            pygame.key.stop_text_input()
+            self._end_edit()
             if d['kind'] == 'slider':
                 v = self._number(d, self.edit)
                 if v is not None:

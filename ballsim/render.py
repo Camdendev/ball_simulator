@@ -93,6 +93,8 @@ class Renderer:
 
         if mode == 'battle':
             self._grid(sim, surf, s)
+        elif mode == 'crusher':
+            self._crusher(sim, surf, s, bg, th)
         elif mode == 'polygon':
             for ring in sorted((r for r in sim.rings if r.alive), key=lambda r: -r.r):
                 col = self._wall_color(sim, ring, bg)
@@ -185,6 +187,57 @@ class Renderer:
             gfxdraw.aapolygon(surf, pts, col)
 
     @staticmethod
+    def _crusher(sim, surf, s, bg, th):
+        cr = sim.crusher
+        col = sim.crusher_color()
+        if cr.flash > 0:
+            col = mix(col, WHITE, cr.flash * 0.6 * float(sim.cfg['flash_strength']))
+        body = mix(bg, col, 0.22)
+        if cr.kind == 'hooks':
+            X, Y = sim.cx * s, sim.cy * s
+            Renderer._circle_ring(surf, X, Y, cr.Rw * s, th * s, col)
+            w = max(2, round(2 * max(6.0, th * 1.2) * s))
+            for pts, _ in cr.arms:
+                sp = [(x * s, y * s) for x, y in pts]
+                pygame.draw.lines(surf, col, False, sp, w)
+                for x, y in sp:
+                    gfxdraw.filled_circle(surf, int(x), int(y), w // 2, col)
+                tx, ty = sp[-1]
+                gfxdraw.filled_circle(surf, int(tx), int(ty), int(w * 0.9), col)  # hook tip
+            hr = int(cr.hub * s)
+            gfxdraw.filled_circle(surf, int(X), int(Y), hr, body)
+            gfxdraw.aacircle(surf, int(X), int(Y), hr, col)
+            pygame.draw.circle(surf, col, (int(X), int(Y)), hr, max(2, int(th * s * 0.6)))
+            return
+
+        co, si = math.cos(cr.rot), math.sin(cr.rot)
+        cx, cy = sim.cx, sim.cy
+
+        def rect(x0, y0, x1, y1, c):
+            if x1 <= x0 or y1 <= y0:
+                return
+            if not cr.rot:
+                r = pygame.Rect(round(x0 * s), round(y0 * s), round((x1 - x0) * s), round((y1 - y0) * s))
+                if r.w > 0 and r.h > 0:
+                    surf.fill(c, r)
+                return
+            pts = []
+            for px, py in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):  # rotate about the arena centre
+                dx, dy = px - cx, py - cy
+                pts.append((round((cx + dx * co - dy * si) * s), round((cy + dx * si + dy * co) * s)))
+            gfxdraw.filled_polygon(surf, pts, c)
+            gfxdraw.aapolygon(surf, pts, c)
+
+        # fixed frame
+        rect(cr.L0 - th, cr.T0 - th, cr.R0 + th, cr.T0, col)
+        rect(cr.L0 - th, cr.B0, cr.R0 + th, cr.B0 + th, col)
+        rect(cr.L0 - th, cr.T0, cr.L0, cr.B0, col)
+        rect(cr.R0, cr.T0, cr.R0 + th, cr.B0, col)
+        # rods first (dimmer), then the platforms on top
+        for x0, y0, x1, y1, _, _, sd, part in sorted(cr.blocks, key=lambda b: b[7] == 'plate'):
+            rect(x0, y0, x1, y1, mix(bg, col, 0.6) if part == 'rod' else col)
+
+    @staticmethod
     def _grid(sim, surf, s):
         g = sim.grid
         ca, cb = sim.team_color(0), sim.team_color(1)
@@ -234,7 +287,8 @@ class Renderer:
         for b in sim.balls:
             col = sim.ball_color(b)
             rr = b.r * s
-            if b.trail and many <= 120:
+            flat = b.squash > 0.05  # squashed balls skip the round trail / glow
+            if b.trail and many <= 120 and not flat:
                 base = sim.team_color(b.team) if sim.grid else bg
                 n = len(b.trail)
                 for k, (tx, ty) in enumerate(b.trail):
@@ -242,11 +296,22 @@ class Renderer:
                     gfxdraw.filled_circle(surf, int(tx * s), int(ty * s),
                                           max(1, int(rr * (0.35 + 0.65 * f))), mix(base, col, f * t_op))
             X, Y = b.x * s, b.y * s
-            if glow:
+            if glow and not flat:
                 gs = self._glow_surf(col, rr, gs_k, gs_size)
                 surf.blit(gs, (X - gs.get_width() / 2, Y - gs.get_height() / 2),
                           special_flags=pygame.BLEND_RGB_ADD)
             ri = max(1, int(round(rr)))
+            if b.squash > 0.01 and b.sq_ang is not None:
+                # squeezed at an angle: draw the ellipse flat, then rotate it into place
+                short = max(1.0, rr * (1 - b.squash))
+                long_ = rr * (1 + b.squash * 0.8)
+                es = pygame.Surface((int(2 * long_) + 4, int(2 * short) + 4), pygame.SRCALPHA)
+                pygame.draw.ellipse(es, col, es.get_rect().inflate(-4, -4))
+                if c['ball_outline']:
+                    pygame.draw.ellipse(es, hex_rgb(c['outline_color']), es.get_rect().inflate(-4, -4), max(1, int(ow * s)))
+                es = pygame.transform.rotate(es, -math.degrees(b.sq_ang) + 90)
+                surf.blit(es, es.get_rect(center=(int(X), int(Y))))
+                continue
             gfxdraw.filled_circle(surf, int(X), int(Y), ri, col)
             gfxdraw.aacircle(surf, int(X), int(Y), ri, col)
             if c['ball_outline']:
