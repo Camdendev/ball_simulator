@@ -1,4 +1,4 @@
-# Ball Simulator
+# BounceBeat
 
 Make satisfying bouncing-ball videos (TikTok / Reels / Shorts style) where every bounce plays the next note of a song.
 
